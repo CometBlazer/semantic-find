@@ -352,7 +352,7 @@ export default function SemanticFindDemo() {
 
           {phase.name === "error" && (
             <div className="sf-status sf-error">
-              <p>Couldn't start the model: {phase.message}</p>
+              <p>Couldn&apos;t start the model: {phase.message}</p>
               <p className="sf-finehint">
                 Check your connection for the first-time model download, then
                 reload the page.
