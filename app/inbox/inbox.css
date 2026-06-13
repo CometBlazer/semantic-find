@@ -1,0 +1,459 @@
+/* ============================================================
+   app/inbox/inbox.css
+   ============================================================
+   Self-contained styling for the email search view. All classes
+   are prefixed `ib-` so nothing collides with the `sf-` overlay
+   from the first demo. Import is scoped to app/inbox/page.tsx.
+
+   Design direction — "searching a stack":
+     - warm paper ground, ink text, one ink-blue signal colour
+     - monospace for metadata (from / time / score / tags) so the
+       view reads like a search console, humanist sans for prose
+     - the signature element is the relevance SPINE: a vertical
+       bar down the left of each card whose height encodes how
+       strongly the email matched. The stack literally shows you
+       where the signal is.
+   ============================================================ */
+
+.ib-root {
+  --paper: #f6f3ec;
+  --paper-2: #fffdf8;
+  --ink: #1c1a17;
+  --ink-soft: #6b655c;
+  --ink-faint: #a39c8f;
+  --line: #e3ddd0;
+  --signal: #2f4b7c;     /* ink blue */
+  --signal-soft: #d9e2f0;
+  --mark: #ffe08a;       /* keyword highlight */
+  --rule: #cfc7b8;
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 6rem;
+  color: var(--ink);
+  font-family: var(--sans);
+}
+
+/* ---------- Masthead ---------- */
+.ib-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: linear-gradient(var(--paper) 78%, transparent);
+  padding-bottom: 1rem;
+  margin-bottom: 1.5rem;
+}
+.ib-head-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+.ib-wordmark {
+  font-family: var(--mono);
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: var(--ink);
+}
+.ib-wordmark-dot {
+  color: var(--signal);
+}
+.ib-corpus-switch {
+  display: flex;
+  gap: 0.25rem;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.2rem;
+}
+.ib-corpus-switch button {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-soft);
+  background: transparent;
+  border: none;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.ib-corpus-switch button.is-on {
+  background: var(--ink);
+  color: var(--paper-2);
+}
+
+/* ---------- Prominent search ---------- */
+.ib-searchwrap {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  background: var(--paper-2);
+  border: 1.5px solid var(--rule);
+  border-radius: 14px;
+  padding: 0 1rem;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), 0 8px 24px -16px rgba(47, 75, 124, 0.35);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.ib-searchwrap:focus-within {
+  border-color: var(--signal);
+  box-shadow: 0 0 0 4px var(--signal-soft);
+}
+.ib-search-glyph {
+  font-size: 1.3rem;
+  color: var(--ink-faint);
+  line-height: 1;
+}
+.ib-search {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: var(--sans);
+  font-size: 1.1rem;
+  padding: 1rem 0;
+  color: var(--ink);
+}
+.ib-search::placeholder {
+  color: var(--ink-faint);
+}
+.ib-search:disabled {
+  color: var(--ink-faint);
+}
+.ib-clear {
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.2rem;
+}
+.ib-clear:hover {
+  color: var(--ink);
+}
+
+/* ---------- Controls row ---------- */
+.ib-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.85rem;
+  gap: 1rem;
+}
+.ib-sort {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ib-sort button {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-soft);
+  background: var(--paper-2);
+  border: none;
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.ib-sort button + button {
+  border-left: 1px solid var(--line);
+}
+.ib-sort button.is-on {
+  background: var(--signal);
+  color: var(--paper-2);
+}
+.ib-status {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--ink-faint);
+  letter-spacing: 0.02em;
+}
+
+/* ---------- Progress / boot ---------- */
+.ib-progress,
+.ib-empty {
+  padding: 1.5rem 0;
+}
+.ib-progress p {
+  margin: 0 0 0.6rem;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+}
+.ib-bar {
+  height: 4px;
+  background: var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.ib-bar-fill {
+  height: 100%;
+  background: var(--signal);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+.ib-hint {
+  font-size: 0.78rem !important;
+  color: var(--ink-faint) !important;
+  margin-top: 0.5rem !important;
+}
+.ib-error p {
+  color: #9a3b2f;
+}
+.ib-boot {
+  max-width: 760px;
+  margin: 6rem auto;
+  text-align: center;
+  font-family: var(--mono, monospace);
+  color: #6b655c;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------- Empty state / examples ---------- */
+.ib-empty-lead {
+  font-size: 0.95rem;
+  color: var(--ink-soft);
+  margin: 0 0 1rem;
+}
+.ib-examples {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.ib-examples button {
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  color: var(--signal);
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.45rem 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.ib-examples button:hover {
+  background: var(--signal-soft);
+  border-color: var(--signal);
+}
+
+/* ---------- The stack of result cards ---------- */
+.ib-stack {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.ib-card {
+  --rel: 0.5;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: box-shadow 0.18s, border-color 0.18s, transform 0.18s;
+}
+.ib-card:hover {
+  border-color: var(--rule);
+  box-shadow: 0 10px 28px -20px rgba(28, 26, 23, 0.5);
+}
+.ib-card.is-open {
+  border-color: var(--signal);
+  box-shadow: 0 14px 36px -22px rgba(47, 75, 124, 0.55);
+}
+.ib-card-main {
+  display: flex;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+  color: inherit;
+}
+
+/* The signature: relevance spine. Height tracks --rel. */
+.ib-card-spine {
+  flex: 0 0 4px;
+  align-self: stretch;
+  margin: 0.4rem 0;
+  border-radius: 999px;
+  background: linear-gradient(
+    to top,
+    var(--signal) calc(var(--rel) * 100%),
+    var(--signal-soft) calc(var(--rel) * 100%)
+  );
+}
+.ib-card-body {
+  flex: 1;
+  padding: 0.9rem 1.1rem 0.95rem 0.9rem;
+  min-width: 0;
+}
+.ib-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 0.25rem;
+}
+.ib-from {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+.ib-time {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.ib-subject {
+  display: block;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  margin-bottom: 0.2rem;
+  line-height: 1.3;
+}
+.ib-snippet {
+  display: block;
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+  line-height: 1.5;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.ib-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+.ib-tag {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.12rem 0.4rem;
+}
+.ib-relscore {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--signal);
+}
+
+/* ---------- Expanded email ---------- */
+.ib-full {
+  border-top: 1px dashed var(--rule);
+  padding: 1rem 1.1rem 1.2rem 0.9rem;
+  animation: ib-open 0.18s ease;
+}
+@keyframes ib-open {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.ib-full-meta {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  margin-bottom: 0.75rem;
+}
+.ib-full-body {
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: var(--ink);
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* ---------- Keyword highlight ---------- */
+.ib-kw {
+  background: var(--mark);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+  box-decoration-break: clone;
+}
+
+/* ---------- Spinner ---------- */
+.ib-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--line);
+  border-top-color: var(--signal);
+  border-radius: 50%;
+  display: inline-block;
+  animation: ib-spin 0.7s linear infinite;
+}
+@keyframes ib-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 560px) {
+  .ib-root {
+    padding: 1.5rem 0.9rem 5rem;
+  }
+  .ib-search {
+    font-size: 1rem;
+  }
+  .ib-controls {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.6rem;
+  }
+}
+
+/* ---------- Accessibility ---------- */
+.ib-card-main:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ib-full,
+  .ib-spinner,
+  .ib-card {
+    animation: none !important;
+    transition: none !important;
+  }
+}
