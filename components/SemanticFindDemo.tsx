@@ -39,6 +39,7 @@ import type { FeatureExtractionPipeline } from "@huggingface/transformers";
 
 import { sampleDocument, DOC_TITLE } from "./sampleDocument";
 import { chunkBlocks, blockId, hashText, type Chunk } from "@/lib/chunk";
+import { extractKeywords, keywordScores } from "@/lib/keyword";
 import {
   getExtractor,
   embedChunks,
@@ -47,7 +48,12 @@ import {
   type Device,
 } from "@/lib/embedding";
 import { loadEmbeddings, saveEmbeddings } from "@/lib/cache";
-import { topK, type Scored } from "@/lib/vector";
+import {
+  topK,
+  reciprocalRankFusion,
+  type Scored,
+  type FusedResult,
+} from "@/lib/vector";
 
 // ---- Types for UI state ---------------------------------------
 
@@ -68,6 +74,35 @@ const EXAMPLE_QUERIES = [
   "what happens if my card is declined",
 ];
 
+// Split text into React nodes with matched keywords wrapped in <mark>.
+// Matches on word prefix so "refund" highlights inside "refunds".
+function highlightKeywords(
+  text: string,
+  keywords: string[]
+): React.ReactNode {
+  if (keywords.length === 0) return text;
+  // Build one regex: word-boundary + (kw1|kw2|...) + any word chars.
+  // Escape each keyword in case one ever contains regex metachars.
+  const esc = keywords.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const re = new RegExp(`\\b(${esc.join("|")})\\w*`, "giu");
+
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let key = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(
+      <mark className="sf-kw" key={key++}>
+        {m[0]}
+      </mark>
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
 export default function SemanticFindDemo() {
   // ---- Indexing state -----------------------------------------
   const [phase, setPhase] = useState<Phase>({ name: "loading-model" });
@@ -76,7 +111,9 @@ export default function SemanticFindDemo() {
   // ---- Search state -------------------------------------------
   const [open, setOpen] = useState(true);
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Scored[]>([]);
+  const [results, setResults] = useState<FusedResult[]>([]);
+  // Keywords from the last executed query — drives highlighting.
+  const [activeKeywords, setActiveKeywords] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0); // keyboard cursor in results
   const [selectedChunk, setSelectedChunk] = useState<number | null>(null);
@@ -157,18 +194,17 @@ export default function SemanticFindDemo() {
   }, [chunks]);
 
   // =============================================================
-  // 4. Debounced semantic search on every query change
+  // 4. Debounced HYBRID search: keyword rank + semantic rank → RRF
   // =============================================================
   const q = query.trim();
 
   useEffect(() => {
     if (phase.name !== "ready") return;
 
-    // Empty query: clear asynchronously so we're not calling
-    // setState synchronously in the effect body.
     if (!q) {
       const id = setTimeout(() => {
         setResults([]);
+        setActiveKeywords([]);
         setSearching(false);
       }, 0);
       return () => clearTimeout(id);
@@ -176,12 +212,36 @@ export default function SemanticFindDemo() {
 
     const seq = ++searchSeq.current;
     const timer = setTimeout(async () => {
-      setSearching(true); // now inside the async callback, not the effect body
+      setSearching(true);
       try {
         const extractor = extractorRef.current!;
+        const texts = chunks.map((c) => c.text);
+
+        // --- Keyword ranking (synchronous, instant) ---
+        const keywords = extractKeywords(q);
+        const kw = keywordScores(texts, keywords)
+          .filter((s) => s.hits > 0) // only chunks that actually match
+          .sort((a, b) => b.score - a.score);
+        const keywordOrder = kw.map((s) => s.index);
+
+        // --- Semantic ranking (async embed + cosine) ---
         const qVec = await embedText(extractor, q);
         if (seq !== searchSeq.current) return; // user kept typing
-        setResults(topK(qVec, vectorsRef.current, TOP_K));
+        const sem = topK(qVec, vectorsRef.current, vectorsRef.current.length);
+        const semanticOrder = sem.map((s: Scored) => s.index);
+
+        // --- Fuse the two rankings with weighted RRF ---
+        // Tune these two weights to taste (see vector.ts comment).
+        const fused = reciprocalRankFusion(
+          [
+            { name: "semantic", list: { order: semanticOrder, weight: 1.0 } },
+            { name: "keyword", list: { order: keywordOrder, weight: 1.0 } },
+          ],
+          TOP_K
+        );
+
+        setResults(fused);
+        setActiveKeywords(keywords);
         setActiveIdx(0);
       } finally {
         if (seq === searchSeq.current) setSearching(false);
@@ -189,7 +249,7 @@ export default function SemanticFindDemo() {
     }, DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [q, phase.name]);
+  }, [q, phase.name, chunks]);
 
   // =============================================================
   // 5. Jump-to-result: scroll + highlight the chunk's paragraphs
@@ -267,7 +327,9 @@ export default function SemanticFindDemo() {
               id={blockId(i)}
               className={highlighted.has(blockId(i)) ? "sf-hit" : undefined}
             >
-              {block.text}
+              {selectedChunk !== null && highlighted.has(blockId(i))
+                ? highlightKeywords(block.text, activeKeywords)
+                : block.text}
             </p>
           )
         )}
@@ -407,7 +469,11 @@ export default function SemanticFindDemo() {
                         <span className="sf-result-score">{pct}%</span>
                       </span>
                       <span className="sf-result-snippet">
-                        {chunk.text.slice(0, 140)}…
+                        {highlightKeywords(
+                          chunk.text.slice(0, 140),
+                          activeKeywords
+                        )}
+                        …
                       </span>
                       <span className="sf-meter" aria-hidden>
                         <span style={{ width: `${pct}%` }} />

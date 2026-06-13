@@ -224,6 +224,17 @@ body {
   animation: sf-spin 0.7s linear infinite;
 }
 
+/* Keyword highlight inside paragraphs and snippets */
+.sf-kw {
+  background: #fde68a;       /* amber-200 */
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.sf-hit .sf-kw {
+  background: #fbbf24;       /* slightly stronger inside the active chunk */
+}
+
 @keyframes sf-spin {
   to {
     transform: rotate(360deg);
