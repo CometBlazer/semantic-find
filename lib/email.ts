@@ -68,10 +68,23 @@ export type SortMode = "best" | "recent";
  */
 export const RECENT_RELEVANCE_FLOOR = 0.5;
 
+/**
+ * Absolute cosine floor for "does this query match anything at all?".
+ * Cosine is comparable across queries (unlike the fused RRF score), so
+ * if the BEST email's cosine is below this AND no keyword landed, the
+ * query is treated as matching nothing ("Elon Musk" in a support inbox).
+ * Tune against your corpus: good matches ~0.4–0.6, nonsense ~0.05–0.2,
+ * so somewhere in the valley (~0.25–0.3) works.
+ */
+export const NO_MATCH_FLOOR = 0.15;
+
 export interface RankedEmail {
   email: Email;
   /** Fused hybrid relevance score (only order is meaningful). */
   score: number;
+  /** Raw cosine similarity to the query — absolute match quality,
+   *  comparable across queries. Drives the % label and spine. */
+  cosine: number;
   /** Original index into the corpus / vector array. */
   index: number;
 }
@@ -88,11 +101,13 @@ export interface RankedEmail {
 export function sortRankedEmails(
   fused: FusedResult[],
   emails: Email[],
-  mode: SortMode
+  mode: SortMode,
+  cosineByIndex: Map<number, number>
 ): RankedEmail[] {
   const ranked: RankedEmail[] = fused.map((r) => ({
     email: emails[r.index],
     score: r.score,
+    cosine: cosineByIndex.get(r.index) ?? 0,
     index: r.index,
   }));
 

@@ -47,6 +47,7 @@ import {
   emailKeywordText,
   sortRankedEmails,
   relativeTime,
+  NO_MATCH_FLOOR,
   type SortMode,
   type RankedEmail,
 } from "@/lib/email";
@@ -119,6 +120,8 @@ export default function EmailSearchDemo() {
   const [activeKeywords, setActiveKeywords] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // True when the query is so arbitrary nothing genuinely matches.
+  const [noMatch, setNoMatch] = useState(false);
 
   const extractorRef = useRef<FeatureExtractionPipeline | null>(null);
   const vectorsRef = useRef<Float32Array[]>([]);
@@ -208,6 +211,7 @@ export default function EmailSearchDemo() {
       const id = setTimeout(() => {
         setResults([]);
         setActiveKeywords([]);
+        setNoMatch(false);
         setSearching(false);
       }, 0);
       return () => clearTimeout(id);
@@ -232,6 +236,23 @@ export default function EmailSearchDemo() {
         const sem = topK(qVec, vectorsRef.current, vectorsRef.current.length);
         const semanticOrder = sem.map((s: Scored) => s.index);
 
+        // Raw cosine is an ABSOLUTE match-quality signal (RRF score is
+        // only relative). Use it both to detect "no real match" and to
+        // show an honest % / spine height per result.
+        const cosineByIndex = new Map(sem.map((s) => [s.index, s.score]));
+        const bestCosine = sem.length > 0 ? sem[0].score : 0;
+
+        // Nothing matches if the best email is semantically far AND no
+        // keyword landed. The keyword half rescues exact-term queries
+        // (names, "GDPR") the embedder underrates, so we never blank out
+        // a legitimate lexical hit.
+        if (bestCosine < NO_MATCH_FLOOR && keywordOrder.length === 0) {
+          setResults([]);
+          setActiveKeywords(keywords);
+          setNoMatch(true);
+          return;
+        }
+
         // fuse
         const fused = reciprocalRankFusion(
           [
@@ -241,8 +262,9 @@ export default function EmailSearchDemo() {
           emails.length // keep all; sort/trim happens in sortRankedEmails
         );
 
-        setResults(sortRankedEmails(fused, emails, sortMode));
+        setResults(sortRankedEmails(fused, emails, sortMode, cosineByIndex));
         setActiveKeywords(keywords);
+        setNoMatch(false);
       } finally {
         if (seq === searchSeq.current) setSearching(false);
       }
@@ -415,7 +437,9 @@ export default function EmailSearchDemo() {
               <li key={e.id}>
                 <article
                   className={`ib-card${expanded ? " is-open" : ""}`}
-                  style={{ ["--rel" as string]: relStrength(r, results) }}
+                  style={{
+                    ["--rel" as string]: Math.max(0, Math.min(1, r.cosine)),
+                  }}
                 >
                   <button
                     className="ib-card-main"
@@ -444,7 +468,7 @@ export default function EmailSearchDemo() {
                         ))}
                         {sortMode === "best" && (
                           <span className="ib-relscore" aria-label="relevance">
-                            {Math.round(relStrength(r, results) * 100)}%
+                            {Math.round(Math.max(0, r.cosine) * 100)}%
                           </span>
                         )}
                       </span>
