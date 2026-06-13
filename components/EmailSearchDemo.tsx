@@ -141,13 +141,16 @@ export default function EmailSearchDemo() {
   // cache key, so flipping back and forth is instant after the
   // first index of each.
   // =============================================================
-  useEffect(() => {
+    useEffect(() => {
     let cancelled = false;
-    setPhase({ name: "loading-model" });
-    setResults([]);
-    setExpandedId(null);
 
     (async () => {
+      // Reset for the newly-selected corpus. Inside the async body
+      // so these aren't synchronous setState calls in the effect.
+      setPhase({ name: "loading-model" });
+      setResults([]);
+      setExpandedId(null);
+
       try {
         const { extractor, device } = await getExtractor((p) => {
           if (!cancelled && typeof p.progress === "number") {
