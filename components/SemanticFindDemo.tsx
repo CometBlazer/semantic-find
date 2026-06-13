@@ -215,11 +215,16 @@ export default function SemanticFindDemo() {
       setSearching(true);
       try {
         const extractor = extractorRef.current!;
-        const texts = chunks.map((c) => c.text);
+        // const texts = chunks.map((c) => c.text); // semantic: body only
+
+        // Keyword pass searches heading + title + body so a query
+        // matching a section name ("billing", "security") ranks
+        // that section even if the word isn't in the paragraphs.
+        const keywordTexts = chunks.map((c) => `${c.heading} ${c.text}`);
 
         // --- Keyword ranking (synchronous, instant) ---
         const keywords = extractKeywords(q);
-        const kw = keywordScores(texts, keywords)
+        const kw = keywordScores(keywordTexts, keywords)
           .filter((s) => s.hits > 0) // only chunks that actually match
           .sort((a, b) => b.score - a.score);
         const keywordOrder = kw.map((s) => s.index);
@@ -295,7 +300,8 @@ export default function SemanticFindDemo() {
       setActiveIdx((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      jumpTo(results[activeIdx].index);
+      const target = results[activeIdx] ?? results[0];
+      jumpTo(target.index);
     }
   };
 
@@ -319,7 +325,9 @@ export default function SemanticFindDemo() {
         {sampleDocument.map((block, i) =>
           block.type === "h2" ? (
             <h2 key={i} id={blockId(i)}>
-              {block.text}
+              {activeKeywords.length > 0
+                ? highlightKeywords(block.text, activeKeywords)
+                : block.text}
             </h2>
           ) : (
             <p
