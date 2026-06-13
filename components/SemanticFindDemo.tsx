@@ -159,22 +159,26 @@ export default function SemanticFindDemo() {
   // =============================================================
   // 4. Debounced semantic search on every query change
   // =============================================================
+  const q = query.trim();
+
   useEffect(() => {
     if (phase.name !== "ready") return;
-    const q = query.trim();
+
+    // Empty query: clear asynchronously so we're not calling
+    // setState synchronously in the effect body.
     if (!q) {
-      setResults([]);
-      setSearching(false);
-      return;
+      const id = setTimeout(() => {
+        setResults([]);
+        setSearching(false);
+      }, 0);
+      return () => clearTimeout(id);
     }
 
-    setSearching(true);
     const seq = ++searchSeq.current;
     const timer = setTimeout(async () => {
+      setSearching(true); // now inside the async callback, not the effect body
       try {
         const extractor = extractorRef.current!;
-        // Embed the query with the SAME model as the chunks —
-        // vectors are only comparable within one embedding space.
         const qVec = await embedText(extractor, q);
         if (seq !== searchSeq.current) return; // user kept typing
         setResults(topK(qVec, vectorsRef.current, TOP_K));
@@ -185,7 +189,7 @@ export default function SemanticFindDemo() {
     }, DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [query, phase.name]);
+  }, [q, phase.name]);
 
   // =============================================================
   // 5. Jump-to-result: scroll + highlight the chunk's paragraphs
