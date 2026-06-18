@@ -1,5 +1,6 @@
 // ============================================================
 // lib/keyword.ts
+// IT IS NOW DEAD CODE, CAN BE DELETED. The keyword half of hybrid search is now in lib/minisearch-lexical.ts, which uses a proper inverted index and is much faster.
 // ============================================================
 // The lexical (keyword) half of hybrid search. Pure and
 // framework-free, like chunk.ts — so it can also run inside a

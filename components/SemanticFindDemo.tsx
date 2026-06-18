@@ -39,7 +39,7 @@ import type { FeatureExtractionPipeline } from "@huggingface/transformers";
 
 import { sampleDocument, DOC_TITLE } from "./sampleDocument";
 import { chunkBlocks, blockId, hashText, type Chunk } from "@/lib/chunk";
-import { extractKeywords, keywordScores } from "@/lib/keyword";
+import { buildLexicalIndex, lexicalSearch, type LexicalIndex } from "@/lib/minisearch-lexical";
 import {
   getExtractor,
   embedChunks,
@@ -63,8 +63,18 @@ type Phase =
   | { name: "ready"; fromCache: boolean }
   | { name: "error"; message: string };
 
+type SearchResult = FusedResult & {
+  /** Raw cosine similarity — drives match % and the no-match gate. */
+  cosine: number;
+  /** Stemmed terms that matched lexically — used for highlighting. */
+  matchedTerms: string[];
+};
+
 const TOP_K = 5;
 const DEBOUNCE_MS = 250;
+const NO_MATCH_FLOOR = 0.28; // min cosine to show a result with no lexical hit
+const SEMANTIC_WEIGHT = 1.0;
+const LEXICAL_WEIGHT = 0.9;
 
 const EXAMPLE_QUERIES = [
   "where does it talk about refunds?",
@@ -111,7 +121,7 @@ export default function SemanticFindDemo() {
   // ---- Search state -------------------------------------------
   const [open, setOpen] = useState(true);
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<FusedResult[]>([]);
+  const [results, setResults] = useState<SearchResult[]>([]);
   // Keywords from the last executed query — drives highlighting.
   const [activeKeywords, setActiveKeywords] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
@@ -128,6 +138,12 @@ export default function SemanticFindDemo() {
 
   // Chunk once — the document is static.
   const chunks: Chunk[] = useMemo(() => chunkBlocks(sampleDocument), []);
+
+  // Build the MiniSearch index synchronously; stable alongside chunks.
+  const msIndex: LexicalIndex = useMemo(
+    () => buildLexicalIndex(chunks.map((c) => ({ text: c.text, heading: c.heading }))),
+    [chunks]
+  );
 
   // =============================================================
   // 1–3. Load model, then embed (or restore) the chunk index
@@ -194,7 +210,7 @@ export default function SemanticFindDemo() {
   }, [chunks]);
 
   // =============================================================
-  // 4. Debounced HYBRID search: keyword rank + semantic rank → RRF
+  // 4. Debounced HYBRID search: MiniSearch lexical + semantic → RRF + gate
   // =============================================================
   const q = query.trim();
 
@@ -215,38 +231,46 @@ export default function SemanticFindDemo() {
       setSearching(true);
       try {
         const extractor = extractorRef.current!;
-        // const texts = chunks.map((c) => c.text); // semantic: body only
 
-        // Keyword pass searches heading + title + body so a query
-        // matching a section name ("billing", "security") ranks
-        // that section even if the word isn't in the paragraphs.
-        const keywordTexts = chunks.map((c) => `${c.heading} ${c.text}`);
-
-        // --- Keyword ranking (synchronous, instant) ---
-        const keywords = extractKeywords(q);
-        const kw = keywordScores(keywordTexts, keywords)
-          .filter((s) => s.hits > 0) // only chunks that actually match
-          .sort((a, b) => b.score - a.score);
-        const keywordOrder = kw.map((s) => s.index);
+        // --- Lexical ranking (MiniSearch: exact + prefix + fuzzy) ---
+        const lexHits = lexicalSearch(msIndex, q);
+        const lexHitSet = new Set(lexHits.map((h) => h.index));
+        const lexTermsMap = new Map(lexHits.map((h) => [h.index, h.terms]));
+        const keywordOrder = lexHits.map((h) => h.index); // already sorted by MiniSearch score
 
         // --- Semantic ranking (async embed + cosine) ---
         const qVec = await embedText(extractor, q);
         if (seq !== searchSeq.current) return; // user kept typing
         const sem = topK(qVec, vectorsRef.current, vectorsRef.current.length);
+        const cosineMap = new Map<number, number>(sem.map((s: Scored) => [s.index, s.score]));
         const semanticOrder = sem.map((s: Scored) => s.index);
 
-        // --- Fuse the two rankings with weighted RRF ---
-        // Tune these two weights to taste (see vector.ts comment).
+        // --- Fuse with weighted RRF (semantic 1.0, lexical 0.9) ---
         const fused = reciprocalRankFusion(
           [
-            { name: "semantic", list: { order: semanticOrder, weight: 1.0 } },
-            { name: "keyword", list: { order: keywordOrder, weight: 1.0 } },
+            { name: "semantic", list: { order: semanticOrder, weight: SEMANTIC_WEIGHT } },
+            { name: "keyword", list: { order: keywordOrder, weight: LEXICAL_WEIGHT } },
           ],
-          TOP_K
+          vectorsRef.current.length // rank all chunks; gate trims the tail
         );
 
-        setResults(fused);
-        setActiveKeywords(keywords);
+        // --- No-match gate: keep only chunks with cosine ≥ floor OR a lexical hit ---
+        const gated: SearchResult[] = fused
+          .filter((r) => {
+            const cosine = cosineMap.get(r.index) ?? 0;
+            return cosine >= NO_MATCH_FLOOR || lexHitSet.has(r.index);
+          })
+          .slice(0, TOP_K)
+          .map((r) => ({
+            ...r,
+            cosine: cosineMap.get(r.index) ?? 0,
+            matchedTerms: lexTermsMap.get(r.index) ?? [],
+          }));
+
+        const allMatchedTerms = [...new Set(gated.flatMap((r) => r.matchedTerms))];
+
+        setResults(gated);
+        setActiveKeywords(allMatchedTerms);
         setActiveIdx(0);
       } finally {
         if (seq === searchSeq.current) setSearching(false);
@@ -254,7 +278,7 @@ export default function SemanticFindDemo() {
     }, DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [q, phase.name, chunks]);
+  }, [q, phase.name, chunks, msIndex]);
 
   // =============================================================
   // 5. Jump-to-result: scroll + highlight the chunk's paragraphs
@@ -452,11 +476,17 @@ export default function SemanticFindDemo() {
             </div>
           )}
 
+          {ready && query.trim() && !searching && results.length === 0 && (
+            <div className="sf-status">
+              <p className="sf-finehint">No results — try different terms.</p>
+            </div>
+          )}
+
           {ready && query.trim() && results.length > 0 && (
             <ol className="sf-results">
               {results.map((r, i) => {
                 const chunk = chunks[r.index];
-                const pct = Math.round(Math.max(0, r.score) * 100);
+                const pct = Math.round(Math.max(0, r.cosine) * 100);
                 return (
                   <li key={r.index}>
                     <button
