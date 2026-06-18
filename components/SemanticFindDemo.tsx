@@ -3,29 +3,28 @@
 // ============================================================
 // components/SemanticFindDemo.tsx
 // ============================================================
-// The whole demo lives in this client component. Architecture:
+// Supercharged Ctrl+F. FOUR signals, fused:
 //
-//   sampleDocument (static blocks)
-//        │ chunkBlocks()                lib/chunk.ts
-//        ▼
-//   chunks[] ──► embedChunks() ──► Float32Array[384] per chunk
-//        │        lib/embedding.ts (transformers.js, in-browser)
-//        │        cached via lib/cache.ts (IndexedDB)
-//        ▼
-//   query ──► embedText() ──► topK() cosine scan ──► results
-//                              lib/vector.ts
+//   substring  lib/substring.ts        literal Ctrl+F (chars)
+//   keyword    lib/minisearch-lexical  tokens: exact+prefix+fuzzy
+//   semantic   lib/embedding + vector  cosine over 384-dim vectors
+//   fusion     lib/vector (RRF)        rank-position blend + gate
 //
-// Lifecycle:
-//   1. mount → chunk the document
-//   2. load the feature-extraction pipeline (WebGPU → WASM)
-//   3. try IndexedDB cache; on miss, embed every chunk with a
-//      visible progress bar, then persist to the cache
-//   4. ready → every keystroke (debounced) embeds the query
-//      locally and brute-force ranks all chunk vectors
-//   5. clicking a result scrolls to the paragraph and highlights it
+// Layering rule ("Ctrl+F always works, semantics overshadows it"):
+//   GATE (eligibility): a chunk shows if it has a substring hit OR
+//     a keyword hit OR cosine >= floor. The substring OR is what
+//     guarantees the literal-find promise — type "f" and every
+//     chunk containing an f is eligible, period.
+//   RANK (ordering): eligible chunks are ordered by RRF over the
+//     semantic + keyword lists, so a strong MEANING match outranks
+//     a chunk that merely contains the letter. Substring feeds the
+//     gate, not the rank — otherwise "e" would flood the top.
 //
-// Nothing here generates text, calls a chat model, or talks to
-// any inference API. It is retrieval only: a smarter Ctrl+F.
+// Each result carries a provenance tag (Exact / Close / Related)
+// computed from which signals fired. A running occurrence count
+// (literal substring total) is always shown, Ctrl+F style.
+//
+// Retrieval only: nothing generates text or calls an inference API.
 // ============================================================
 
 import {
@@ -39,7 +38,21 @@ import type { FeatureExtractionPipeline } from "@huggingface/transformers";
 
 import { sampleDocument, DOC_TITLE } from "./sampleDocument";
 import { chunkBlocks, blockId, hashText, type Chunk } from "@/lib/chunk";
-import { buildLexicalIndex, lexicalSearch, type LexicalIndex } from "@/lib/minisearch-lexical";
+import {
+  buildLexicalIndex,
+  lexicalSearch,
+  type LexicalIndex,
+} from "@/lib/minisearch-lexical";
+import {
+  substringHits,
+  totalOccurrences,
+  isLiteralFragment,
+} from "@/lib/substring";
+import {
+  classify,
+  PROVENANCE_META,
+  type Provenance,
+} from "@/lib/provenance";
 import {
   getExtractor,
   embedChunks,
@@ -66,15 +79,23 @@ type Phase =
 type SearchResult = FusedResult & {
   /** Raw cosine similarity — drives match % and the no-match gate. */
   cosine: number;
-  /** Stemmed terms that matched lexically — used for highlighting. */
+  /** Stemmed doc terms that matched lexically — used for highlighting. */
   matchedTerms: string[];
+  /** Which signals fired → the colored tag. */
+  provenance: Provenance;
+  /** Literal substring occurrences in this chunk (0 if none). */
+  substringCount: number;
 };
 
 const TOP_K = 5;
 const DEBOUNCE_MS = 250;
-const NO_MATCH_FLOOR = 0.28; // min cosine to show a result with no lexical hit
+const NO_MATCH_FLOOR = 0.28; // min cosine to show a result with no lexical/substring hit
 const SEMANTIC_WEIGHT = 1.0;
 const LEXICAL_WEIGHT = 0.9;
+// Substring ranks LOW on purpose: it's a safety net for the gate,
+// not a relevance signal. Without this a one-char query floods the
+// top of the list with whatever chunk has the most of that letter.
+const SUBSTRING_WEIGHT = 0.3;
 
 const EXAMPLE_QUERIES = [
   "where does it talk about refunds?",
@@ -91,8 +112,6 @@ function highlightKeywords(
   keywords: string[]
 ): React.ReactNode {
   if (keywords.length === 0) return text;
-  // Build one regex: word-boundary + (kw1|kw2|...) + any word chars.
-  // Escape each keyword in case one ever contains regex metachars.
   const esc = keywords.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   const re = new RegExp(`\\b(${esc.join("|")})\\w*`, "giu");
 
@@ -113,6 +132,36 @@ function highlightKeywords(
   return out;
 }
 
+// Literal substring highlighter — for the Ctrl+F path. Wraps every
+// case-insensitive occurrence of the raw needle, mid-word included
+// (this is what catches the "f" inside "offline"). Kept separate
+// from highlightKeywords, which is word/prefix-aware.
+function highlightSubstring(
+  text: string,
+  needle: string
+): React.ReactNode {
+  const n = needle.trim();
+  if (!n) return text;
+  const lowerText = text.toLowerCase();
+  const lowerN = n.toLowerCase();
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  let key = 0;
+  for (;;) {
+    const at = lowerText.indexOf(lowerN, last);
+    if (at === -1) break;
+    if (at > last) out.push(text.slice(last, at));
+    out.push(
+      <mark className="sf-kw" key={key++}>
+        {text.slice(at, at + n.length)}
+      </mark>
+    );
+    last = at + n.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
 export default function SemanticFindDemo() {
   // ---- Indexing state -----------------------------------------
   const [phase, setPhase] = useState<Phase>({ name: "loading-model" });
@@ -122,26 +171,36 @@ export default function SemanticFindDemo() {
   const [open, setOpen] = useState(true);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
-  // Keywords from the last executed query — drives highlighting.
   const [activeKeywords, setActiveKeywords] = useState<string[]>([]);
+  // The raw literal needle for substring highlighting in the body.
+  const [activeNeedle, setActiveNeedle] = useState("");
+  const [occurrences, setOccurrences] = useState(0); // total literal hits
+  const [literalMode, setLiteralMode] = useState(false); // short fragment?
   const [searching, setSearching] = useState(false);
-  const [activeIdx, setActiveIdx] = useState(0); // keyboard cursor in results
+  const [activeIdx, setActiveIdx] = useState(0);
   const [selectedChunk, setSelectedChunk] = useState<number | null>(null);
 
   // ---- Long-lived objects kept out of React state -------------
-  // Vectors and the pipeline are big and never drive rendering
-  // directly, so refs avoid pointless re-renders and effect churn.
   const extractorRef = useRef<FeatureExtractionPipeline | null>(null);
   const vectorsRef = useRef<Float32Array[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
-  const searchSeq = useRef(0); // discards stale async search results
+  const searchSeq = useRef(0);
 
   // Chunk once — the document is static.
   const chunks: Chunk[] = useMemo(() => chunkBlocks(sampleDocument), []);
 
   // Build the MiniSearch index synchronously; stable alongside chunks.
   const msIndex: LexicalIndex = useMemo(
-    () => buildLexicalIndex(chunks.map((c) => ({ text: c.text, heading: c.heading }))),
+    () =>
+      buildLexicalIndex(
+        chunks.map((c) => ({ text: c.text, heading: c.heading }))
+      ),
+    [chunks]
+  );
+
+  // Raw chunk texts for the substring scan (verbatim, not tokenized).
+  const chunkTexts: string[] = useMemo(
+    () => chunks.map((c) => c.text),
     [chunks]
   );
 
@@ -153,7 +212,6 @@ export default function SemanticFindDemo() {
 
     (async () => {
       try {
-        // Step 1: model (downloads ~25 MB once, then browser-cached).
         const { extractor, device } = await getExtractor((p) => {
           if (!cancelled && typeof p.progress === "number") {
             setPhase({
@@ -167,7 +225,6 @@ export default function SemanticFindDemo() {
         extractorRef.current = extractor;
         setDevice(device);
 
-        // Step 2: cache lookup — key ties model + document together.
         const docHash = hashText(chunks.map((c) => c.text).join("\u0000"));
         const cacheKey = `${MODEL_ID}::${docHash}`;
         const cached = await loadEmbeddings(cacheKey);
@@ -178,7 +235,6 @@ export default function SemanticFindDemo() {
           return;
         }
 
-        // Step 3: embed every chunk locally, with visible progress.
         setPhase({ name: "indexing", done: 0, total: chunks.length });
         const vectors = await embedChunks(
           extractor,
@@ -190,7 +246,7 @@ export default function SemanticFindDemo() {
         if (cancelled) return;
 
         vectorsRef.current = vectors;
-        await saveEmbeddings(cacheKey, vectors); // best-effort persist
+        await saveEmbeddings(cacheKey, vectors);
         setPhase({ name: "ready", fromCache: false });
       } catch (err) {
         console.error(err);
@@ -210,7 +266,7 @@ export default function SemanticFindDemo() {
   }, [chunks]);
 
   // =============================================================
-  // 4. Debounced HYBRID search: MiniSearch lexical + semantic → RRF + gate
+  // 4. Debounced search: substring + lexical + semantic → gate + RRF
   // =============================================================
   const q = query.trim();
 
@@ -221,6 +277,9 @@ export default function SemanticFindDemo() {
       const id = setTimeout(() => {
         setResults([]);
         setActiveKeywords([]);
+        setActiveNeedle("");
+        setOccurrences(0);
+        setLiteralMode(false);
         setSearching(false);
       }, 0);
       return () => clearTimeout(id);
@@ -232,45 +291,81 @@ export default function SemanticFindDemo() {
       try {
         const extractor = extractorRef.current!;
 
-        // --- Lexical ranking (MiniSearch: exact + prefix + fuzzy) ---
+        // --- Signal 1: literal substring (Ctrl+F) ---
+        const subHits = substringHits(chunkTexts, q);
+        const subCountMap = new Map(subHits.map((h) => [h.index, h.count]));
+        const subHitSet = new Set(subHits.map((h) => h.index));
+        const totalOcc = totalOccurrences(subHits);
+        // Order substring hits by occurrence count (most first) so they
+        // have a defined RRF rank even though their weight is low.
+        const substringOrder = [...subHits]
+          .sort((a, b) => b.count - a.count)
+          .map((h) => h.index);
+
+        // --- Signal 2: lexical (MiniSearch exact+prefix+fuzzy) ---
         const lexHits = lexicalSearch(msIndex, q);
         const lexHitSet = new Set(lexHits.map((h) => h.index));
         const lexTermsMap = new Map(lexHits.map((h) => [h.index, h.terms]));
-        const keywordOrder = lexHits.map((h) => h.index); // already sorted by MiniSearch score
+        const lexExactSet = new Set(
+          lexHits.filter((h) => h.hasExact).map((h) => h.index)
+        );
+        const lexFuzzySet = new Set(
+          lexHits.filter((h) => h.fuzzyOnly).map((h) => h.index)
+        );
+        const keywordOrder = lexHits.map((h) => h.index); // MiniSearch-sorted
 
-        // --- Semantic ranking (async embed + cosine) ---
+        // --- Signal 3: semantic (embed + cosine) ---
         const qVec = await embedText(extractor, q);
         if (seq !== searchSeq.current) return; // user kept typing
         const sem = topK(qVec, vectorsRef.current, vectorsRef.current.length);
-        const cosineMap = new Map<number, number>(sem.map((s: Scored) => [s.index, s.score]));
+        const cosineMap = new Map<number, number>(
+          sem.map((s: Scored) => [s.index, s.score])
+        );
         const semanticOrder = sem.map((s: Scored) => s.index);
 
-        // --- Fuse with weighted RRF (semantic 1.0, lexical 0.9) ---
+        // --- Fuse semantic + keyword + substring with weighted RRF ---
         const fused = reciprocalRankFusion(
           [
             { name: "semantic", list: { order: semanticOrder, weight: SEMANTIC_WEIGHT } },
             { name: "keyword", list: { order: keywordOrder, weight: LEXICAL_WEIGHT } },
+            { name: "substring", list: { order: substringOrder, weight: SUBSTRING_WEIGHT } },
           ],
-          vectorsRef.current.length // rank all chunks; gate trims the tail
+          vectorsRef.current.length
         );
 
-        // --- No-match gate: keep only chunks with cosine ≥ floor OR a lexical hit ---
+        // --- Gate: keep chunks with a substring hit OR a lexical hit
+        //     OR cosine >= floor. (Ctrl+F promise lives in the first OR.) ---
         const gated: SearchResult[] = fused
           .filter((r) => {
             const cosine = cosineMap.get(r.index) ?? 0;
-            return cosine >= NO_MATCH_FLOOR || lexHitSet.has(r.index);
+            return (
+              subHitSet.has(r.index) ||
+              lexHitSet.has(r.index) ||
+              cosine >= NO_MATCH_FLOOR
+            );
           })
           .slice(0, TOP_K)
           .map((r) => ({
             ...r,
             cosine: cosineMap.get(r.index) ?? 0,
             matchedTerms: lexTermsMap.get(r.index) ?? [],
+            substringCount: subCountMap.get(r.index) ?? 0,
+            provenance: classify({
+              hasSubstring: subHitSet.has(r.index),
+              hasExactKeyword: lexExactSet.has(r.index),
+              hasFuzzyKeyword: lexFuzzySet.has(r.index),
+            }),
           }));
 
-        const allMatchedTerms = [...new Set(gated.flatMap((r) => r.matchedTerms))];
+        const allMatchedTerms = [
+          ...new Set(gated.flatMap((r) => r.matchedTerms)),
+        ];
 
         setResults(gated);
         setActiveKeywords(allMatchedTerms);
+        setActiveNeedle(q);
+        setOccurrences(totalOcc);
+        setLiteralMode(isLiteralFragment(q));
         setActiveIdx(0);
       } finally {
         if (seq === searchSeq.current) setSearching(false);
@@ -278,7 +373,7 @@ export default function SemanticFindDemo() {
     }, DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [q, phase.name, chunks, msIndex]);
+  }, [q, phase.name, chunkTexts, msIndex]);
 
   // =============================================================
   // 5. Jump-to-result: scroll + highlight the chunk's paragraphs
@@ -294,8 +389,6 @@ export default function SemanticFindDemo() {
   );
 
   // ---- Keyboard shortcuts -------------------------------------
-  // Cmd/Ctrl+K opens the finder (native Ctrl+F is left alone so
-  // the browser's literal find still works alongside this one).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -312,8 +405,6 @@ export default function SemanticFindDemo() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Arrow keys move through results, Enter jumps — like Ctrl+F's
-  // next/previous buttons.
   const onInputKeyDown = (e: React.KeyboardEvent) => {
     if (results.length === 0) return;
     if (e.key === "ArrowDown") {
@@ -329,13 +420,23 @@ export default function SemanticFindDemo() {
     }
   };
 
-  // Which paragraph ids are currently highlighted?
   const highlighted = useMemo(() => {
     if (selectedChunk === null) return new Set<string>();
     return new Set(chunks[selectedChunk].blockIds);
   }, [selectedChunk, chunks]);
 
   const ready = phase.name === "ready";
+
+  // In literal mode, body highlighting uses raw substring; otherwise
+  // it uses the word/prefix-aware keyword highlighter.
+  const renderBlockText = (text: string) => {
+    if (literalMode && activeNeedle) {
+      return highlightSubstring(text, activeNeedle);
+    }
+    return activeKeywords.length > 0
+      ? highlightKeywords(text, activeKeywords)
+      : text;
+  };
 
   // =============================================================
   // Render
@@ -349,8 +450,8 @@ export default function SemanticFindDemo() {
         {sampleDocument.map((block, i) =>
           block.type === "h2" ? (
             <h2 key={i} id={blockId(i)}>
-              {activeKeywords.length > 0
-                ? highlightKeywords(block.text, activeKeywords)
+              {activeKeywords.length > 0 || (literalMode && activeNeedle)
+                ? renderBlockText(block.text)
                 : block.text}
             </h2>
           ) : (
@@ -360,7 +461,9 @@ export default function SemanticFindDemo() {
               className={highlighted.has(blockId(i)) ? "sf-hit" : undefined}
             >
               {selectedChunk !== null && highlighted.has(blockId(i))
-                ? highlightKeywords(block.text, activeKeywords)
+                ? renderBlockText(block.text)
+                : literalMode && activeNeedle
+                ? renderBlockText(block.text)
                 : block.text}
             </p>
           )
@@ -412,6 +515,24 @@ export default function SemanticFindDemo() {
             {searching && <span className="sf-spinner" aria-hidden />}
           </div>
 
+          {/* ----- Ctrl+F-style occurrence count (always shown when searching) ----- */}
+          {ready && q && (
+            <div className="sf-countbar">
+              {occurrences > 0 ? (
+                <span>
+                  {occurrences} literal {occurrences === 1 ? "match" : "matches"}
+                  {" "}
+                  across {results.filter((r) => r.substringCount > 0).length}{" "}
+                  {results.filter((r) => r.substringCount > 0).length === 1
+                    ? "chunk"
+                    : "chunks"}
+                </span>
+              ) : (
+                <span>No literal matches — showing meaning-based results</span>
+              )}
+            </div>
+          )}
+
           {/* ----- Status / progress while not ready ----- */}
           {phase.name === "loading-model" && (
             <div className="sf-status">
@@ -440,9 +561,7 @@ export default function SemanticFindDemo() {
               <div className="sf-bar">
                 <div
                   className="sf-bar-fill"
-                  style={{
-                    width: `${(phase.done / phase.total) * 100}%`,
-                  }}
+                  style={{ width: `${(phase.done / phase.total) * 100}%` }}
                 />
               </div>
             </div>
@@ -459,34 +578,37 @@ export default function SemanticFindDemo() {
           )}
 
           {/* ----- Ready: examples or results ----- */}
-          {ready && !query.trim() && (
+          {ready && !q && (
             <div className="sf-status">
               <p className="sf-finehint">
                 {chunks.length} chunks indexed
-                {phase.fromCache ? " (restored from IndexedDB)" : ""}. Try a
-                meaning, not a keyword:
+                {phase.name === "ready" && phase.fromCache
+                  ? " (restored from IndexedDB)"
+                  : ""}
+                . Try a meaning, not a keyword:
               </p>
               <ul className="sf-examples">
-                {EXAMPLE_QUERIES.map((q) => (
-                  <li key={q}>
-                    <button onClick={() => setQuery(q)}>{q}</button>
+                {EXAMPLE_QUERIES.map((ex) => (
+                  <li key={ex}>
+                    <button onClick={() => setQuery(ex)}>{ex}</button>
                   </li>
                 ))}
               </ul>
             </div>
           )}
 
-          {ready && query.trim() && !searching && results.length === 0 && (
+          {ready && q && !searching && results.length === 0 && (
             <div className="sf-status">
               <p className="sf-finehint">No results — try different terms.</p>
             </div>
           )}
 
-          {ready && query.trim() && results.length > 0 && (
+          {ready && q && results.length > 0 && (
             <ol className="sf-results">
               {results.map((r, i) => {
                 const chunk = chunks[r.index];
                 const pct = Math.round(Math.max(0, r.cosine) * 100);
+                const tag = PROVENANCE_META[r.provenance];
                 return (
                   <li key={r.index}>
                     <button
@@ -504,15 +626,29 @@ export default function SemanticFindDemo() {
                         <span className="sf-result-section">
                           {chunk.heading || DOC_TITLE}
                         </span>
+                        <span className={`sf-tag ${tag.className}`}>
+                          {tag.label}
+                        </span>
                         <span className="sf-result-score">{pct}%</span>
                       </span>
                       <span className="sf-result-snippet">
-                        {highlightKeywords(
-                          chunk.text.slice(0, 140),
-                          activeKeywords
-                        )}
+                        {literalMode && activeNeedle
+                          ? highlightSubstring(
+                              chunk.text.slice(0, 140),
+                              activeNeedle
+                            )
+                          : highlightKeywords(
+                              chunk.text.slice(0, 140),
+                              activeKeywords
+                            )}
                         …
                       </span>
+                      {r.substringCount > 0 && (
+                        <span className="sf-result-occ">
+                          {r.substringCount} literal{" "}
+                          {r.substringCount === 1 ? "hit" : "hits"} here
+                        </span>
+                      )}
                       <span className="sf-meter" aria-hidden>
                         <span style={{ width: `${pct}%` }} />
                       </span>

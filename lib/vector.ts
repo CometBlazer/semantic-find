@@ -55,7 +55,7 @@ export function topK(
 // Hybrid fusion: weighted Reciprocal Rank Fusion (RRF)
 // ============================================================
 // Why RRF instead of blending the raw scores?
-//   Cosine (~0.3–0.6 here) and keyword scores live on totally
+//   Cosine, keyword, and substring scores live on totally
 //   different scales, so adding them lets whichever has bigger
 //   numbers dominate. RRF throws the magnitudes away and fuses
 //   by RANK POSITION instead, which needs no normalization and
@@ -63,14 +63,14 @@ export function topK(
 //
 //   For each list, a chunk at rank r contributes weight/(k + r).
 //   A chunk's final score is the sum of those contributions over
-//   every list it appears in — so chunks ranked highly by BOTH
-//   the keyword and semantic rankers rise to the top.
+//   every list it appears in — so chunks ranked highly by SEVERAL
+//   rankers rise to the top.
 //
 // Tuning knobs:
-//   - semanticWeight / keywordWeight: relative trust in each
-//     signal. Equal (1/1) is neutral. Raise keywordWeight to make
-//     exact-term matches matter more; raise semanticWeight to
-//     favour meaning/paraphrase.
+//   - per-list weight: relative trust in each signal. Semantic and
+//     keyword lead; substring is weighted LOW because it's an
+//     eligibility safety-net (Ctrl+F), not a relevance signal —
+//     otherwise a one-letter query would flood the top.
 //   - RRF_K: smoothing. Larger k flattens the advantage of being
 //     rank #1 vs #2 vs #3 (60 is the literature default). Smaller
 //     k makes the very top of each list count for much more.
@@ -90,18 +90,20 @@ export interface FusedResult {
   index: number;
   /** Fused RRF score (small positive numbers; only order matters). */
   score: number;
-  /** Per-list ranks for debugging/UI. undefined = absent from that list. */
-  semanticRank?: number;
-  keywordRank?: number;
+  /** Per-list ranks for debugging/UI, keyed by list name.
+   *  undefined entry = chunk absent from that list. */
+  ranks: Record<string, number>;
 }
 
 /**
- * Fuse any number of ranked lists with weighted RRF and return the
- * top `k`. A chunk need not appear in every list — semantic-only
- * and keyword-only matches both still place.
+ * Fuse any number of named ranked lists with weighted RRF and return
+ * the top `k`. A chunk need not appear in every list — semantic-only,
+ * keyword-only, and substring-only matches all still place. List
+ * names are free-form (e.g. "semantic", "keyword", "substring") and
+ * are recorded per chunk in `ranks` for inspection.
  */
 export function reciprocalRankFusion(
-  lists: { name: "semantic" | "keyword"; list: RankedList }[],
+  lists: { name: string; list: RankedList }[],
   k = 5,
   rrfK = RRF_K
 ): FusedResult[] {
@@ -111,10 +113,10 @@ export function reciprocalRankFusion(
     list.order.forEach((chunkIndex, rank) => {
       const contribution = list.weight / (rrfK + rank);
       const existing =
-        acc.get(chunkIndex) ?? ({ index: chunkIndex, score: 0 } as FusedResult);
+        acc.get(chunkIndex) ??
+        ({ index: chunkIndex, score: 0, ranks: {} } as FusedResult);
       existing.score += contribution;
-      if (name === "semantic") existing.semanticRank = rank;
-      else existing.keywordRank = rank;
+      existing.ranks[name] = rank;
       acc.set(chunkIndex, existing);
     });
   }
