@@ -14,7 +14,7 @@ The project ships **two demos on the same embedding + fusion core**:
 - **`/`** — a "superpowered Ctrl+F" overlay over one long document. Type a
   meaning, jump to the matching paragraph, see keywords highlighted. The
   document finder fuses **three** signals (substring + keyword + semantic) and
-  tags each result by provenance (Exact / Close / Related).
+  tags each result by provenance (Exact / Close / Related / Loosely related).
 - **`/inbox`** — searching and filtering a **stack of emails**. A prominent
   search bar filters many email JSON blocks down to the matches, with a
   Best-match / Most-recent toggle, expandable cards, and a relevance spine.
@@ -31,7 +31,10 @@ differ per demo.
 - **Absolute-cosine scoring**: an honest per-result match %, plus a "no results"
   gate for arbitrary queries
 - **Provenance tags** (document demo): each result is labelled Exact / Close /
-  Related from which signals fired
+  Related / Loosely related from which signals fired, with filter checkboxes
+  to show/hide each tier
+- **Off-main-thread model** (document demo): the embedding pipeline runs in a
+  Web Worker — typing never janks, even on the WASM/CPU path
 - Brute-force cosine similarity (the right call at this scale)
 - Stopword-stripped keyword extraction + live match highlighting
 - IndexedDB cache for computed embeddings
@@ -50,7 +53,7 @@ npm run dev
 To start from a fresh app and copy files over:
 
 ```bash
-npx create-next-app@latest semantic-find --typescript --app --no-tailwind --eslint --src-dir=false --import-alias "@/*"
+npx create-next-app@latest semantic-find --typescript --app --no-tailwind --src-dir=false --import-alias "@/*"
 cd semantic-find
 npm install @huggingface/transformers minisearch
 ```
@@ -59,11 +62,10 @@ npm install @huggingface/transformers minisearch
 > runtime dependency alongside transformers.js. MiniSearch ships its own type
 > declarations — there's no separate `@types/minisearch` to install.
 
-If you're on Next.js 16 (Turbopack default), the bundler config lives under
-`turbopack.resolveAlias` in `next.config.ts`, which stubs out the Node-only
-`onnxruntime-node` and `sharp` deps in the browser build. The library is only
-imported behind an `ssr: false` boundary, so the server never touches it either
-way.
+This repo's bundler config lives under `turbopack.resolveAlias` in
+`next.config.ts`, which stubs out the Node-only `onnxruntime-node` and `sharp`
+deps in the browser build. The library is only imported behind an `ssr: false`
+boundary, so the server never touches it either way.
 
 > **Working out of OneDrive / a synced folder?** Keep `node_modules` out of it.
 > OneDrive holds file handles open inside `node_modules`, which surfaces as
@@ -81,8 +83,11 @@ portable straight into a Chrome extension):
 |------|-----------|
 | `lib/chunk.ts` | Document model + 100–200-word chunker |
 | `lib/vector.ts` | Cosine similarity, top-k, **weighted RRF fusion** (any number of named lists) |
-| `lib/embedding.ts` | transformers.js pipeline, WebGPU→WASM |
+| `lib/embedding.ts` | transformers.js pipeline, WebGPU→WASM (used by the inbox demo) |
+| `lib/embedding.worker.ts` | Web Worker: runs the transformers.js pipeline off the main thread (used by the document demo) |
+| `lib/embedding-client.ts` | Main-thread façade over the worker — same API as `lib/embedding.ts` |
 | `lib/cache.ts` | IndexedDB embedding cache |
+| `lib/spellcheck.ts` | Corpus-based "did you mean?" — Damerau-Levenshtein over the indexed vocabulary (built, not yet wired into a demo) |
 
 Document-finder lexical + literal layer (also pure TypeScript, no React):
 
@@ -103,7 +108,8 @@ Demo 1 — document finder (`/`):
 | File | What it is |
 |------|-----------|
 | `components/sampleDocument.ts` | The long demo document |
-| `components/SemanticFindDemo.tsx` | Overlay UI + orchestration |
+| `components/SemanticFindUI.tsx` | Overlay UI + orchestration; imports the worker-backed helpers from `lib/embedding-client.ts` |
+| `components/SemanticFindDemo.tsx` | Compatibility copy of the worker client helper; not rendered by the route |
 | `app/page.tsx` | Client page, `dynamic(..., { ssr: false })` |
 
 Demo 2 — email inbox (`/inbox`):
@@ -171,10 +177,12 @@ stays findable) while semantic meaning still decides the **order**.
 It helps to see the gate and the ranking as distinct jobs:
 
 - **The gate decides what shows.** A chunk is eligible if it has a substring
-  hit **OR** a keyword hit **OR** its cosine clears an absolute floor
-  (`NO_MATCH_FLOOR`). The substring/keyword arms are the escape hatch that keeps
-  literal and exact-term queries from ever being blanked out by a cold embedder;
-  the cosine arm lets pure-meaning matches through when no word literally lands.
+  hit **OR** a keyword hit **OR** its cosine clears a low absolute floor
+  (`LOOSE_FLOOR`). The substring/keyword arms keep literal and exact-term
+  queries from ever being blanked out by a cold embedder; the cosine arm lets
+  pure-meaning matches through. Semantic-only results are further split by a
+  second threshold (`RELATED_FLOOR`): above it they're tagged *Related*,
+  below it *Loosely related*.
 - **RRF decides the order** of whatever's eligible. So "keyword priority" isn't
   a weight tweak — it's the gate rule that a lexical or literal hit makes a chunk
   eligible regardless of cosine, while semantic meaning still leads the ranking
@@ -195,10 +203,12 @@ absolute and comparable across queries — for judgment:
 - **The displayed % and the relevance meter** come from each result's raw cosine,
   so a strong match reads ~70% and a weak one ~20%, instead of the top result
   always being "100%" by construction.
-- **The no-match gate**: if a chunk's cosine is below the absolute floor *and*
-  it has no keyword or substring hit, it's dropped. The lexical/literal arms are
+- **The no-match gate**: if a chunk's cosine is below `LOOSE_FLOOR` *and* it
+  has no keyword or substring hit, it's dropped. The lexical/literal arms are
   the escape hatch so a legitimate exact-term query the embedder underrates is
-  never blanked out.
+  never blanked out. `LOOSE_FLOOR` is intentionally low (0.15) — the real
+  quality signal for semantic-only results is the *Related* vs *Loosely related*
+  split at `RELATED_FLOOR` (0.4).
 
 ### Provenance tags: Exact / Close / Related
 
@@ -209,11 +219,15 @@ fired for it (`lib/provenance.ts`), so the list explains itself:
   keyword term matched. High confidence; your actual characters/words are there.
 - **Close** — no exact hit, but MiniSearch's fuzzy matcher fired (a typo was
   corrected, "refnd" → "refund").
-- **Related** — no lexical hit at all; the chunk surfaced only because its
-  *meaning* was close enough to clear the cosine floor.
+- **Related** — no lexical hit; the chunk surfaced because its *meaning* is a
+  confident semantic match (cosine ≥ `RELATED_FLOOR`).
+- **Loosely related** — no lexical hit; weak but real semantic signal
+  (`LOOSE_FLOOR` ≤ cosine < `RELATED_FLOOR`). Surfaced but visibly demoted —
+  useful for single-word queries like "legal" or "corporate" that the model
+  scores at a lower cosine against prose that never uses the word.
 
-Precedence is Exact > Close > Related, so a chunk that's both a literal hit and
-a fuzzy-only keyword match reads as Exact.
+Precedence is Exact > Close > Related > Loosely related, so a chunk that's
+both a literal hit and a fuzzy-only keyword match reads as Exact.
 
 ### Occurrence count
 
@@ -271,12 +285,12 @@ between them re-indexes once, then loads instantly.
 
 All adjustable without touching logic:
 
-- **RRF weights** (`EmailSearchDemo.tsx` / `SemanticFindDemo.tsx`, the `weight:`
+- **RRF weights** (`EmailSearchDemo.tsx` / `SemanticFindUI.tsx`, the `weight:`
   values) — relative trust in each signal. In the document finder, raise the
   keyword weight to make exact-term matches win more, raise the semantic weight
   to favour meaning, and keep the **substring weight low** (≈0.3) so a literal
   fragment stays findable without dominating the order.
-- **`SUBSTRING_WEIGHT`** (`SemanticFindDemo.tsx`) — how much the literal Ctrl+F
+- **`SUBSTRING_WEIGHT`** (`SemanticFindUI.tsx`) — how much the literal Ctrl+F
   list counts toward ordering. Low by design; raise it only if you want literal
   hits to outrank meaning.
 - **`isLiteralFragment` threshold** (`lib/substring.ts`, ≤ 3 chars) — when the
@@ -284,10 +298,16 @@ All adjustable without touching logic:
   it to treat longer fragments as literal scrubbing.
 - **`RRF_K`** (`lib/vector.ts`, default `60`) — smoothing. Lower (~20) makes the
   very top of each list count for much more; raise to flatten rank #1 vs #5.
-- **`NO_MATCH_FLOOR`** (`SemanticFindDemo.tsx` for the document finder,
-  `lib/email.ts` for the inbox) — absolute cosine below which a query with no
-  keyword/substring hit is treated as matching nothing. Good matches sit
-  ~0.4–0.6, nonsense ~0.05–0.2, so ~0.25–0.3 lands in the valley.
+- **`LOOSE_FLOOR`** (`SemanticFindUI.tsx`, default 0.15) — the low safety net.
+  A semantic-only result below this is dropped entirely (gibberish gate). Keep
+  it low; the quality split is handled by `RELATED_FLOOR`.
+- **`RELATED_FLOOR`** (`SemanticFindUI.tsx`, default 0.4) — the confident-vs-weak
+  split for semantic-only results. Above this → *Related*; between this and
+  `LOOSE_FLOOR` → *Loosely related*. Good matches sit ~0.4–0.6; raise toward
+  0.5 for a stricter confident tier, lower if legitimate queries get demoted.
+  The always-on debug readout shows raw cosines to help tune these. For the
+  inbox, `NO_MATCH_FLOOR` in `lib/email.ts` plays the same role as
+  `LOOSE_FLOOR`.
 - **Fuzzy floor** (`lib/minisearch-lexical.ts`) — MiniSearch fuzzy is enabled
   only for terms ≥ 4 chars, at edit distance ≈ 0.2 × term length. Loosen for
   more typo tolerance, tighten to reduce false matches.
@@ -303,7 +323,8 @@ sampleDocument (headings + paragraphs, each with a stable DOM id)
       │  lib/chunk.ts — group paragraphs into ~150-word chunks,
       │                 never crossing a heading
       ▼
-chunks[] ──► lib/embedding.ts ──► one Float32Array[384] per chunk
+chunks[] ──► lib/embedding-client.ts ──► lib/embedding.worker.ts (Web Worker)
+      │       ──► one Float32Array[384] per chunk (zero-copy ArrayBuffer transfer)
       │       (feature-extraction pipeline, mean pooling, normalized)
       │       cached in IndexedDB keyed by  modelId + hash(document)
       ▼
@@ -320,7 +341,7 @@ query
       ▼
   gate: keep chunks with a substring hit OR keyword hit OR cosine ≥ floor
       ▼
-  classify each survivor: Exact / Close / Related   (lib/provenance.ts)
+  classify each survivor: Exact / Close / Related / Loosely related   (lib/provenance.ts)
       ▼
 click / Enter ──► scrollIntoView(anchorId)
               ──► highlight chunk's paragraphs + <mark> matched keywords
@@ -363,10 +384,14 @@ results, **Enter** jumps to the top match, **Esc** closes.
 
 The core was split with this in mind: `lib/chunk.ts`, `lib/vector.ts`,
 `lib/minisearch-lexical.ts`, `lib/substring.ts`, `lib/provenance.ts`,
-`lib/keyword.ts`, `lib/cache.ts`, `lib/embedding.ts` and `lib/email.ts` have no
-React or Next.js imports, so they move to an extension unchanged — the whole
-hybrid pipeline, RRF fusion, substring scan, cosine scoring and all. What
-changes is where the text comes from and where the UI lives.
+`lib/keyword.ts`, `lib/cache.ts`, `lib/embedding.ts`, `lib/spellcheck.ts` and
+`lib/email.ts` have no React or Next.js imports, so they move to an extension
+unchanged — the whole hybrid pipeline, RRF fusion, substring scan, cosine
+scoring and all. The worker pair (`lib/embedding.worker.ts` +
+`lib/embedding-client.ts`) is also browser-native and maps directly onto the
+extension's offscreen-document / service-worker pattern (option 2 in the
+"Where the model runs" section below). What changes is where the text comes
+from and where the UI lives.
 
 **1. Manifest (MV3).** A content script plus the model files:
 
