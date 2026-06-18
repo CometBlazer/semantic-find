@@ -46,13 +46,17 @@ const watch = process.argv.includes("--watch");
 // the browser exactly like next.config.ts does.
 const EMPTY = resolve(root, "empty-module.ts");
 
-// ORT runtime WASM that embedding.worker.ts points wasmPaths at.
-const WASM_FILE = "ort-wasm-simd-threaded.jsep.wasm";
-const WASM_SRC = resolve(
-  root,
-  "node_modules/@huggingface/transformers/dist",
-  WASM_FILE
-);
+// ORT runtime files that embedding.worker.ts points wasmPaths at. ORT
+// loads the .wasm binary AND dynamically imports its .mjs JS glue from
+// the same base, so BOTH must be present locally — otherwise ORT throws
+// "no available backend found … Failed to fetch dynamically imported
+// module … .jsep.mjs" and falls back to nothing (MV3 forbids fetching
+// the runtime from a CDN).
+const WASM_DIST = resolve(root, "node_modules/@huggingface/transformers/dist");
+const WASM_FILES = [
+  "ort-wasm-simd-threaded.jsep.wasm",
+  "ort-wasm-simd-threaded.jsep.mjs",
+];
 
 /** Re-copy every static asset into dist-extension. Runs on each build
  *  so `watch` keeps the output complete. */

@@ -22,15 +22,15 @@ Extension-only code lives in `/extension`:
 | File                   | Role                                                  |
 | ---------------------- | ----------------------------------------------------- |
 | `manifest.json`        | MV3 manifest (`Alt+Shift+K` command)                  |
-| `background.ts`        | turns the command/icon click into a toggle message    |
+| `background.ts`        | command/icon toggle + creates the offscreen document   |
 | `content.ts`           | Shadow-DOM overlay + wiring (runs on the page)         |
 | `overlay.css`          | overlay UI styles + on-page highlight styles           |
 | `extractor.ts`         | reads real page text into blocks + element map         |
 | `highlighter.ts`       | scrolls to + highlights the chosen result (reversible) |
 | `extension-search.ts`  | hybrid search orchestration (semantic optional)        |
 | `embedding.worker.ts`  | transformers.js pipeline, local WASM                   |
-| `embedding-client.ts`  | spawns/talks to the worker                             |
-| `offscreen.{html,ts}`  | stubs for the future offscreen runtime (Option B)      |
+| `embedding-client.ts`  | content-side port to the offscreen model host          |
+| `offscreen.{html,ts}`  | extension-origin host that owns the embedding worker   |
 
 ## Build
 
@@ -109,9 +109,14 @@ result · clicking a result jumps + highlights it on the page.
 
 ## Known limitations / next steps
 
-- Model runtime uses **Option A** (one worker per tab, spawned from the
-  content script). If a host page's CSP blocks the worker, switch to the
-  **Option B** offscreen document (stubs in `offscreen.{html,ts}`).
+- Model runtime uses **Option B**: the embedding worker is spawned by an
+  **offscreen document** (`offscreen.{html,ts}`), created on demand by the
+  service worker. This is required because a worker spawned from the
+  content script runs in the **host page's origin**, where the page's CSP
+  (`connect-src`) blocks the Hugging Face model download. The offscreen
+  document runs in the extension's origin, so its fetch is governed by
+  `host_permissions` instead. Extension pages also need `'wasm-unsafe-eval'`
+  in the manifest CSP to compile the ONNX Runtime WASM.
 - Extraction is a single pass over block elements; very app-like SPAs or
   canvas-rendered pages may yield little text. Mozilla Readability could
   be added later for article-mode extraction.

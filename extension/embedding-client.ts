@@ -1,17 +1,25 @@
 // ============================================================
 // extension/embedding-client.ts
 // ============================================================
-// Content-script-side façade over embedding.worker.ts. Mirrors the
-// public API of lib/embedding-client.ts (getExtractor / embedText /
-// embedChunks) so the orchestration code reads the same — but the
-// worker is spawned from an EXTENSION url (chrome.runtime.getURL),
-// not a bundler URL, and the local WASM base is handed to it.
+// Content-script-side façade over the embedding model. Mirrors the
+// public API of lib/embedding-client.ts (loadModel / embedText /
+// embedChunks) so the orchestration code reads the same.
 //
-// Spawning the worker from a content script with an extension URL is
-// the "Option A" runtime from the build doc: simplest path, model
-// instance per tab. If a host page's CSP ever blocks this, the
-// offscreen-document approach (Option B, stubbed in offscreen.ts) is
-// the documented upgrade.
+// The model does NOT run in the content script's worker anymore. A
+// content script lives in the HOST PAGE's origin, and a worker spawned
+// there is bound by the host page's Content Security Policy — which on
+// locked-down sites (Wikipedia, etc.) blocks the Hugging Face model
+// download outright. Instead the model runs in an OFFSCREEN DOCUMENT
+// (extension origin, governed by the extension's CSP + host_permissions).
+//
+// Flow:
+//   1. ask the service worker to create the offscreen document,
+//   2. open a long-lived Port ("sf-embed") to it,
+//   3. speak the embedding.worker.ts protocol over that port.
+//
+// chrome.runtime ports serialize as JSON, so vectors cross the port as
+// plain number[] arrays (the offscreen side unwraps the worker's
+// ArrayBuffers); we rebuild Float32Arrays here.
 // ============================================================
 
 export const MODEL_ID = "Xenova/all-MiniLM-L6-v2";
@@ -29,101 +37,93 @@ type Pending = {
   onEmbedProgress?: (done: number, total: number) => void;
 };
 
-let worker: Worker | null = null;
+let port: chrome.runtime.Port | null = null;
+let portPromise: Promise<chrome.runtime.Port> | null = null;
 let nextId = 1;
 const pending = new Map<number, Pending>();
 
-function getWorker(): Worker {
-  if (worker) return worker;
+function rejectAll(err: Error): void {
+  for (const [, p] of pending) p.reject(err);
+  pending.clear();
+}
 
-  // Loaded as a CLASSIC worker from the extension origin. A content
-  // script runs in the host page's origin, and Chrome (MV3) refuses to
-  // construct a *module* worker from a chrome-extension:// URL in that
-  // context — it throws "SecurityError: ... cannot be accessed from
-  // origin" even when the script is web-accessible. Classic workers from
-  // web_accessible_resources are allowed, and esbuild bundles the worker
-  // (transformers.js included) into one self-contained IIFE, so no
-  // runtime ES imports are needed. The Hub is still reachable via the
-  // extension's host permissions.
-  const url = chrome.runtime.getURL("embedding.worker.js");
-  worker = new Worker(url);
+async function getPort(): Promise<chrome.runtime.Port> {
+  if (port) return port;
+  if (portPromise) return portPromise;
 
-  worker.onmessage = (e: MessageEvent) => {
-    const m = e.data as {
-      id: number;
-      type: string;
-      device?: string;
-      buffer?: ArrayBuffer;
-      buffers?: ArrayBuffer[];
-      message?: string;
-      status?: string;
-      file?: string;
-      progress?: number;
-      done?: number;
-      total?: number;
-    };
-    const p = pending.get(m.id);
-    if (!p) return;
+  portPromise = (async () => {
+    // The service worker is the only context allowed to create the
+    // offscreen document; make sure it exists before we connect.
+    await chrome.runtime.sendMessage({ type: "SF_ENSURE_OFFSCREEN" });
 
-    switch (m.type) {
-      case "progress":
-        p.onProgress?.({
-          status: m.status ?? "downloading",
-          file: m.file,
-          progress: m.progress,
-        });
-        break;
-      case "embedProgress":
-        p.onEmbedProgress?.(m.done ?? 0, m.total ?? 0);
-        break;
-      case "ready":
-        pending.delete(m.id);
-        p.resolve({ device: m.device });
-        break;
-      case "vector":
-        pending.delete(m.id);
-        p.resolve(new Float32Array(m.buffer!));
-        break;
-      case "vectors":
-        pending.delete(m.id);
-        p.resolve((m.buffers ?? []).map((b) => new Float32Array(b)));
-        break;
-      case "error":
-        pending.delete(m.id);
-        p.reject(new Error(m.message ?? "worker error"));
-        break;
-    }
-  };
-  // Surface as much as the browser gives us. For a worker that fails to
-  // load/parse, `message` is often blank (cross-origin sanitized), but
-  // `filename`/`lineno` and `error` usually pinpoint it.
-  worker.onerror = (e: ErrorEvent) => {
-    const where = e.filename ? ` @ ${e.filename}:${e.lineno}:${e.colno}` : "";
-    const inner =
-      e.error instanceof Error ? `${e.error.name}: ${e.error.message}` : "";
-    const msg = e.message || inner || "worker crashed (no message)";
-    const err = new Error(`worker error: ${msg}${where}`);
-    for (const [, p] of pending) p.reject(err);
-    pending.clear();
-  };
-  // Fires when a posted message can't be deserialized (structured clone).
-  worker.onmessageerror = (e: MessageEvent) => {
-    const err = new Error(`worker message deserialization failed: ${String(e.data)}`);
-    for (const [, p] of pending) p.reject(err);
-    pending.clear();
-  };
-  return worker;
+    const p = chrome.runtime.connect({ name: "sf-embed" });
+
+    p.onMessage.addListener((m: Record<string, unknown> & { id?: number; type?: string }) => {
+      // Fatal worker errors carry no id — fail everything in flight.
+      if (m.type === "fatal") {
+        rejectAll(new Error((m.message as string) ?? "embedding worker crashed"));
+        return;
+      }
+      const entry = pending.get(m.id as number);
+      if (!entry) return;
+
+      switch (m.type) {
+        case "progress":
+          entry.onProgress?.({
+            status: (m.status as string) ?? "downloading",
+            file: m.file as string | undefined,
+            progress: m.progress as number | undefined,
+          });
+          break;
+        case "embedProgress":
+          entry.onEmbedProgress?.((m.done as number) ?? 0, (m.total as number) ?? 0);
+          break;
+        case "ready":
+          pending.delete(m.id as number);
+          entry.resolve({ device: m.device });
+          break;
+        case "vector":
+          pending.delete(m.id as number);
+          entry.resolve(Float32Array.from((m.vector as number[]) ?? []));
+          break;
+        case "vectors":
+          pending.delete(m.id as number);
+          entry.resolve(((m.vectors as number[][]) ?? []).map((v) => Float32Array.from(v)));
+          break;
+        case "error":
+          pending.delete(m.id as number);
+          entry.reject(new Error((m.message as string) ?? "model error"));
+          break;
+      }
+    });
+
+    p.onDisconnect.addListener(() => {
+      const reason = chrome.runtime.lastError?.message ?? "offscreen model port disconnected";
+      rejectAll(new Error(reason));
+      // Drop the cached port so the next call re-creates the offscreen
+      // document and reconnects.
+      port = null;
+      portPromise = null;
+    });
+
+    port = p;
+    return p;
+  })();
+
+  // If setup fails, clear the memo so a later attempt can retry.
+  portPromise.catch(() => {
+    portPromise = null;
+  });
+  return portPromise;
 }
 
 function call<T>(
   message: Record<string, unknown>,
   opts?: {
-    transfer?: Transferable[];
     onProgress?: (p: ModelProgress) => void;
     onEmbedProgress?: (done: number, total: number) => void;
   }
 ): Promise<T> {
-  const w = getWorker();
   const id = nextId++;
   return new Promise<T>((resolve, reject) => {
     pending.set(id, {
@@ -132,11 +132,18 @@ function call<T>(
       onProgress: opts?.onProgress,
       onEmbedProgress: opts?.onEmbedProgress,
     });
-    w.postMessage({ id, ...message }, opts?.transfer ?? []);
+    getPort().then(
+      (p) => p.postMessage({ id, ...message }),
+      (err) => {
+        pending.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    );
   });
 }
 
-/** Load the model in the worker. Passes the bundled WASM base so ORT
+/** Load the model in the offscreen document. Passes the bundled WASM base
+ *  (an extension-absolute URL, valid in the offscreen origin too) so ORT
  *  never reaches for remote runtime code. */
 export async function loadModel(
   onProgress?: (p: ModelProgress) => void
