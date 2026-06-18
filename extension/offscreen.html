@@ -1,0 +1,22 @@
+<!doctype html>
+<!--
+  extension/offscreen.html
+  ========================
+  Placeholder for the "Option B" model runtime described in the build
+  doc: an offscreen document that owns the Transformers.js pipeline so
+  the model lives in one extension-controlled context shared across
+  tabs, rather than one worker per content script (the current
+  "Option A" in embedding-client.ts).
+
+  Not wired up yet. To enable: add the "offscreen" permission to
+  manifest.json, have background.ts create this document, and route
+  embedding requests content -> background -> offscreen.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+  </head>
+  <body>
+    <script type="module" src="offscreen.js"></script>
+  </body>
+</html>
