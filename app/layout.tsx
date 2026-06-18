@@ -9,14 +9,7 @@
 // ============================================================
 
 import type { Metadata } from "next";
-import { Source_Serif_4 } from "next/font/google";
 import "./globals.css";
-
-const serif = Source_Serif_4({
-  subsets: ["latin"],
-  variable: "--font-doc",
-  weight: ["400", "600", "700"],
-});
 
 export const metadata: Metadata = {
   title: "Semantic Find — local Ctrl+F with embeddings",
@@ -31,7 +24,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={serif.variable}>{children}</body>
+      <body>{children}</body>
     </html>
   );
 }

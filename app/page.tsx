@@ -12,9 +12,43 @@
 // ============================================================
 
 import dynamic from "next/dynamic";
+import { useEffect, useState } from "react";
 
 const SemanticFindDemo = dynamic(
-  () => import("@/components/SemanticFindDemo"),
+  async () => {
+    const { MODEL_ID, getExtractor } = await import("@/lib/embedding-client");
+
+    return function SemanticFindWorkerDemo() {
+      const [message, setMessage] = useState(`Loading ${MODEL_ID}...`);
+
+      useEffect(() => {
+        let cancelled = false;
+
+        getExtractor((progress) => {
+          if (cancelled || typeof progress.progress !== "number") return;
+          setMessage(`Loading ${MODEL_ID}... ${Math.round(progress.progress)}%`);
+        })
+          .then(({ device }) => {
+            if (!cancelled) setMessage(`Worker ready on ${device}.`);
+          })
+          .catch((error) => {
+            if (!cancelled) {
+              setMessage(
+                error instanceof Error
+                  ? `Could not start worker: ${error.message}`
+                  : "Could not start worker."
+              );
+            }
+          });
+
+        return () => {
+          cancelled = true;
+        };
+      }, []);
+
+      return <p className="sf-booting">{message}</p>;
+    };
+  },
   {
     ssr: false,
     loading: () => <p className="sf-booting">Loading semantic find…</p>,
