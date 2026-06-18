@@ -377,7 +377,7 @@ click / Enter ──► scrollIntoView(anchorId)
   pipeline itself can't survive a tab close — only a service worker can keep one
   warm across tabs while the browser process lives.)
 
-Shortcuts (document demo): **⌘K / Ctrl+K** opens the finder, **↑/↓** move through
+Shortcuts (document demo): **Alt+Shift+K** opens the finder, **↑/↓** move through
 results, **Enter** jumps to the top match, **Esc** closes.
 
 ## Turning this into a Chrome extension
