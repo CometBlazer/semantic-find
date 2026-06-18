@@ -392,3 +392,110 @@ body {
     transition: none !important;
   }
 }
+
+/* ============================================================
+   Supercharged-find additions
+   ------------------------------------------------------------
+   Append to the END of app/globals.css. Styles the elements
+   added for substring (Ctrl+F) search: the occurrence count
+   bar, the provenance pills (Exact / Close / Related), and the
+   per-result literal-hit line — plus a fix to the result header
+   now that it holds THREE children instead of two.
+   ============================================================ */
+
+/* New tag colors, defined alongside the existing :root tokens.
+   Kept here so this block is fully self-contained; you can fold
+   them into the main :root if you prefer one place. */
+:root {
+  --tag-exact-bg: #e7f5ec;
+  --tag-exact-fg: #1f7a44;
+  --tag-close-bg: #fdf2dd;
+  --tag-close-fg: #9a6512;
+  --tag-related-bg: #eef0f3;
+  --tag-related-fg: #5b6573;
+}
+
+/* ---------- Ctrl+F-style occurrence count ---------- */
+
+.sf-countbar {
+  padding: 0 0.9rem 0.55rem;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 0.4rem;
+}
+
+/* ---------- Result header: now THREE children ----------
+   Was section + score with space-between. Adding the tag in the
+   middle made space-between scatter them. Let the section name
+   take the slack and keep tag + score tight on the right. */
+
+.sf-result-head {
+  /* justify-content from the base rule no longer matters once the
+     section flexes; gap handles spacing. */
+  gap: 0.4rem;
+}
+
+.sf-result-section {
+  flex: 1 1 auto;        /* eat the free space, push tag+score right */
+  min-width: 0;          /* allow the section text to ellipsize */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sf-result-score {
+  flex: 0 0 auto;        /* stay natural width on the far right */
+}
+
+/* ---------- Provenance pills ---------- */
+
+.sf-tag {
+  flex: 0 0 auto;
+  font-family: var(--sans);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.4rem;
+  border-radius: 999px;
+  line-height: 1.4;
+  white-space: nowrap;
+  /* nudge the baseline-aligned pill to sit centered against text */
+  transform: translateY(-0.5px);
+}
+
+.sf-tag-exact {
+  background: var(--tag-exact-bg);
+  color: var(--tag-exact-fg);
+}
+
+.sf-tag-close {
+  background: var(--tag-close-bg);
+  color: var(--tag-close-fg);
+}
+
+.sf-tag-related {
+  background: var(--tag-related-bg);
+  color: var(--tag-related-fg);
+}
+
+/* ---------- Per-result literal-hit line ---------- */
+
+.sf-result-occ {
+  display: block;
+  margin-top: 0.3rem;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--ink-soft);
+}
+
+/* ---------- Reduced-motion: nothing new animates, but keep the
+   translateY nudge from fighting anything. ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .sf-tag {
+    transform: none;
+  }
+}
