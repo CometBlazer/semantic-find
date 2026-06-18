@@ -51,6 +51,7 @@ import {
 import {
   classify,
   PROVENANCE_META,
+  PROVENANCE_ORDER,
   type Provenance,
 } from "@/lib/provenance";
 import {
@@ -88,8 +89,22 @@ type SearchResult = FusedResult & {
 };
 
 const TOP_K = 5;
+// Hard ceiling on the eligible list before tag-filtering. Higher than TOP_K
+// because loose matches are shown in full and trimmed by the user's tag
+// checkboxes, not by a fixed top-5 cut. Purely a flood guard.
+const MAX_RESULTS = 20;
 const DEBOUNCE_MS = 250;
-const NO_MATCH_FLOOR = 0.28; // min cosine to show a result with no lexical/substring hit
+// Two-tier semantic gating. A chunk with no lexical/substring hit must clear
+// LOOSE_FLOOR to show at all (the gibberish gate); whether it reads as a
+// confident "Related" or a demoted "Loosely related" depends on RELATED_FLOOR.
+//   cosine >= RELATED_FLOOR          -> "Related"        (confident meaning)
+//   LOOSE_FLOOR <= cosine < RELATED  -> "Loosely related" (weak but real)
+//   cosine < LOOSE_FLOOR, no lexical -> gated out         (no signal)
+// These are MiniLM-specific starting points — tune against real queries using
+// the debug readout (toggle in the finder header). The valley between nonsense
+// (~0.10–0.20) and loose-but-real (~0.30–0.38) is narrow, so small moves matter.
+const LOOSE_FLOOR = 0.3; // gibberish gate: below this (no lexical hit) => nothing
+const RELATED_FLOOR = 0.45; // confident-vs-loose split
 const SEMANTIC_WEIGHT = 1.0;
 const LEXICAL_WEIGHT = 0.9;
 // Substring ranks LOW on purpose: it's a safety net for the gate,
@@ -179,6 +194,16 @@ export default function SemanticFindDemo() {
   const [searching, setSearching] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
   const [selectedChunk, setSelectedChunk] = useState<number | null>(null);
+  // Which provenance tags are currently shown. All on by default; toggling
+  // filters the DISPLAYED list only (instant — no re-search).
+  const [visibleTags, setVisibleTags] = useState<Record<Provenance, boolean>>({
+    exact: true,
+    close: true,
+    related: true,
+    loose: true,
+  });
+  // Raw-cosine debug readout, for tuning the floors against real queries.
+  const [showDebug, setShowDebug] = useState(false);
 
   // ---- Long-lived objects kept out of React state -------------
   const extractorRef = useRef<FeatureExtractionPipeline | null>(null);
@@ -334,28 +359,41 @@ export default function SemanticFindDemo() {
         );
 
         // --- Gate: keep chunks with a substring hit OR a lexical hit
-        //     OR cosine >= floor. (Ctrl+F promise lives in the first OR.) ---
+        //     OR cosine >= LOOSE_FLOOR. The substring/lexical arms keep the
+        //     Ctrl+F + exact-term promise; the cosine arm admits semantic-only
+        //     matches down to the loose floor. Below that with no lexical hit
+        //     (gibberish) => dropped. ---
         const gated: SearchResult[] = fused
           .filter((r) => {
             const cosine = cosineMap.get(r.index) ?? 0;
             return (
               subHitSet.has(r.index) ||
               lexHitSet.has(r.index) ||
-              cosine >= NO_MATCH_FLOOR
+              cosine >= LOOSE_FLOOR
             );
           })
-          .slice(0, TOP_K)
-          .map((r) => ({
-            ...r,
-            cosine: cosineMap.get(r.index) ?? 0,
-            matchedTerms: lexTermsMap.get(r.index) ?? [],
-            substringCount: subCountMap.get(r.index) ?? 0,
-            provenance: classify({
-              hasSubstring: subHitSet.has(r.index),
-              hasExactKeyword: lexExactSet.has(r.index),
-              hasFuzzyKeyword: lexFuzzySet.has(r.index),
-            }),
-          }));
+          // Cap generously rather than at TOP_K: the user asked to SEE all
+          // loose matches and filter them via tag checkboxes, so don't pre-trim
+          // the tail to 5. MAX_RESULTS just bounds pathological floods.
+          .slice(0, MAX_RESULTS)
+          .map((r) => {
+            const cosine = cosineMap.get(r.index) ?? 0;
+            return {
+              ...r,
+              cosine,
+              matchedTerms: lexTermsMap.get(r.index) ?? [],
+              substringCount: subCountMap.get(r.index) ?? 0,
+              provenance: classify(
+                {
+                  hasSubstring: subHitSet.has(r.index),
+                  hasExactKeyword: lexExactSet.has(r.index),
+                  hasFuzzyKeyword: lexFuzzySet.has(r.index),
+                  cosine,
+                },
+                { relatedFloor: RELATED_FLOOR, looseFloor: LOOSE_FLOOR }
+              ),
+            };
+          });
 
         const allMatchedTerms = [
           ...new Set(gated.flatMap((r) => r.matchedTerms)),
@@ -405,17 +443,49 @@ export default function SemanticFindDemo() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Per-tag counts across the full (unfiltered) result set — drives the
+  // checkbox labels and the "N hidden" line.
+  const tagCounts = useMemo(() => {
+    const c: Record<Provenance, number> = {
+      exact: 0,
+      close: 0,
+      related: 0,
+      loose: 0,
+    };
+    for (const r of results) c[r.provenance]++;
+    return c;
+  }, [results]);
+
+  // The list actually rendered: full results minus tags the user unchecked.
+  const visibleResults = useMemo(
+    () => results.filter((r) => visibleTags[r.provenance]),
+    [results, visibleTags]
+  );
+  const hiddenCount = results.length - visibleResults.length;
+
+  // If filtering shrinks the visible list below the cursor, pull it back.
+  useEffect(() => {
+    setActiveIdx((i) =>
+      visibleResults.length === 0
+        ? 0
+        : Math.min(i, visibleResults.length - 1)
+    );
+  }, [visibleResults.length]);
+
+  const toggleTag = (t: Provenance) =>
+    setVisibleTags((prev) => ({ ...prev, [t]: !prev[t] }));
+
   const onInputKeyDown = (e: React.KeyboardEvent) => {
-    if (results.length === 0) return;
+    if (visibleResults.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveIdx((i) => Math.min(i + 1, results.length - 1));
+      setActiveIdx((i) => Math.min(i + 1, visibleResults.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActiveIdx((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const target = results[activeIdx] ?? results[0];
+      const target = visibleResults[activeIdx] ?? visibleResults[0];
       jumpTo(target.index);
     }
   };
@@ -604,59 +674,134 @@ export default function SemanticFindDemo() {
           )}
 
           {ready && q && results.length > 0 && (
-            <ol className="sf-results">
-              {results.map((r, i) => {
-                const chunk = chunks[r.index];
-                const pct = Math.round(Math.max(0, r.cosine) * 100);
-                const tag = PROVENANCE_META[r.provenance];
-                return (
-                  <li key={r.index}>
-                    <button
+            <>
+              {/* ----- Tag filters: show/hide each provenance class ----- */}
+              <div className="sf-filters" role="group" aria-label="Filter by match type">
+                {PROVENANCE_ORDER.map((t) => {
+                  const meta = PROVENANCE_META[t];
+                  const count = tagCounts[t];
+                  return (
+                    <label
+                      key={t}
                       className={[
-                        "sf-result",
-                        i === activeIdx ? "is-active" : "",
-                        selectedChunk === r.index ? "is-selected" : "",
+                        "sf-filter",
+                        meta.className,
+                        count === 0 ? "is-empty" : "",
+                        visibleTags[t] ? "is-on" : "is-off",
                       ].join(" ")}
-                      onClick={() => {
-                        setActiveIdx(i);
-                        jumpTo(r.index);
-                      }}
                     >
-                      <span className="sf-result-head">
-                        <span className="sf-result-section">
-                          {chunk.heading || DOC_TITLE}
-                        </span>
-                        <span className={`sf-tag ${tag.className}`}>
-                          {tag.label}
-                        </span>
-                        <span className="sf-result-score">{pct}%</span>
+                      <input
+                        type="checkbox"
+                        checked={visibleTags[t]}
+                        disabled={count === 0}
+                        onChange={() => toggleTag(t)}
+                      />
+                      <span>
+                        {meta.label} {count > 0 && <b>{count}</b>}
                       </span>
-                      <span className="sf-result-snippet">
-                        {literalMode && activeNeedle
-                          ? highlightSubstring(
-                              chunk.text.slice(0, 140),
-                              activeNeedle
-                            )
-                          : highlightKeywords(
-                              chunk.text.slice(0, 140),
-                              activeKeywords
-                            )}
-                        …
-                      </span>
-                      {r.substringCount > 0 && (
-                        <span className="sf-result-occ">
-                          {r.substringCount} literal{" "}
-                          {r.substringCount === 1 ? "hit" : "hits"} here
-                        </span>
-                      )}
-                      <span className="sf-meter" aria-hidden>
-                        <span style={{ width: `${pct}%` }} />
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ol>
+                    </label>
+                  );
+                })}
+                <button
+                  type="button"
+                  className={`sf-debugtoggle ${showDebug ? "is-on" : ""}`}
+                  onClick={() => setShowDebug((s) => !s)}
+                  aria-pressed={showDebug}
+                  title="Show raw cosine scores for tuning"
+                >
+                  debug
+                </button>
+              </div>
+
+              {showDebug && (
+                <p className="sf-debughint">
+                  floors — loose ≥ {LOOSE_FLOOR.toFixed(2)} · related ≥{" "}
+                  {RELATED_FLOOR.toFixed(2)} · below loose (no lexical) = gated
+                </p>
+              )}
+
+              {visibleResults.length === 0 ? (
+                <div className="sf-status">
+                  <p className="sf-finehint">
+                    All {results.length}{" "}
+                    {results.length === 1 ? "result" : "results"} hidden by
+                    filters.
+                  </p>
+                </div>
+              ) : (
+                <ol className="sf-results">
+                  {visibleResults.map((r, i) => {
+                    const chunk = chunks[r.index];
+                    const pct = Math.round(Math.max(0, r.cosine) * 100);
+                    const tag = PROVENANCE_META[r.provenance];
+                    return (
+                      <li key={r.index}>
+                        <button
+                          className={[
+                            "sf-result",
+                            i === activeIdx ? "is-active" : "",
+                            selectedChunk === r.index ? "is-selected" : "",
+                          ].join(" ")}
+                          onClick={() => {
+                            setActiveIdx(i);
+                            jumpTo(r.index);
+                          }}
+                        >
+                          <span className="sf-result-head">
+                            <span className="sf-result-section">
+                              {chunk.heading || DOC_TITLE}
+                            </span>
+                            <span className={`sf-tag ${tag.className}`}>
+                              {tag.label}
+                            </span>
+                            <span className="sf-result-score">{pct}%</span>
+                          </span>
+                          <span className="sf-result-snippet">
+                            {literalMode && activeNeedle
+                              ? highlightSubstring(
+                                  chunk.text.slice(0, 140),
+                                  activeNeedle
+                                )
+                              : highlightKeywords(
+                                  chunk.text.slice(0, 140),
+                                  activeKeywords
+                                )}
+                            …
+                          </span>
+                          {r.substringCount > 0 && (
+                            <span className="sf-result-occ">
+                              {r.substringCount} literal{" "}
+                              {r.substringCount === 1 ? "hit" : "hits"} here
+                            </span>
+                          )}
+                          {showDebug && (
+                            <span className="sf-result-debug">
+                              cosine {r.cosine.toFixed(3)} · rrf{" "}
+                              {r.score.toFixed(4)}
+                              {r.ranks.semantic !== undefined &&
+                                ` · sem#${r.ranks.semantic}`}
+                              {r.ranks.keyword !== undefined &&
+                                ` · kw#${r.ranks.keyword}`}
+                              {r.ranks.substring !== undefined &&
+                                ` · sub#${r.ranks.substring}`}
+                            </span>
+                          )}
+                          <span className="sf-meter" aria-hidden>
+                            <span style={{ width: `${pct}%` }} />
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+
+              {hiddenCount > 0 && visibleResults.length > 0 && (
+                <p className="sf-hiddennote">
+                  {hiddenCount} more hidden by filters
+                </p>
+              )}
+            </>
           )}
         </section>
       )}
