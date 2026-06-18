@@ -622,3 +622,50 @@ body {
     transition: none !important;
   }
 }
+
+/* ============================================================
+   Results gap + count-breakdown additions
+   ------------------------------------------------------------
+   Append to the END of app/globals.css. Adds vertical spacing
+   between result cards and styles the new count summary line
+   (total results + per-category breakdown) in the count bar.
+   ============================================================ */
+
+/* ---------- Nonzero gap between result cards ---------- */
+
+.sf-results {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;            /* the requested breathing room between results */
+}
+
+/* ---------- Count summary: total + breakdown + literal line ---------- */
+
+.sf-countbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.sf-countline {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.sf-countbreakdown {
+  font-weight: 400;
+  color: var(--ink-soft);
+}
+
+.sf-countbreakdown::before {
+  content: " — ";
+  color: var(--ink-soft);
+}
+
+.sf-countpart {
+  white-space: nowrap;
+}
+
+.sf-countliteral {
+  color: var(--ink-soft);
+}
