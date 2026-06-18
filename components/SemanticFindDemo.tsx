@@ -95,16 +95,22 @@ const TOP_K = 5;
 const MAX_RESULTS = 20;
 const DEBOUNCE_MS = 250;
 // Two-tier semantic gating. A chunk with no lexical/substring hit must clear
-// LOOSE_FLOOR to show at all (the gibberish gate); whether it reads as a
-// confident "Related" or a demoted "Loosely related" depends on RELATED_FLOOR.
-//   cosine >= RELATED_FLOOR          -> "Related"        (confident meaning)
-//   LOOSE_FLOOR <= cosine < RELATED  -> "Loosely related" (weak but real)
-//   cosine < LOOSE_FLOOR, no lexical -> gated out         (no signal)
-// These are MiniLM-specific starting points — tune against real queries using
-// the debug readout (toggle in the finder header). The valley between nonsense
-// (~0.10–0.20) and loose-but-real (~0.30–0.38) is narrow, so small moves matter.
-const LOOSE_FLOOR = 0.3; // gibberish gate: below this (no lexical hit) => nothing
-const RELATED_FLOOR = 0.45; // confident-vs-loose split
+// LOOSE_FLOOR to show at all; whether it reads as a confident "Related" or a
+// demoted "Loosely related" depends on RELATED_FLOOR.
+//   cosine >= RELATED_FLOOR          -> "Related"          (confident meaning)
+//   LOOSE_FLOOR <= cosine < RELATED  -> "Loosely related"  (weak but real)
+//   cosine < LOOSE_FLOOR, no lexical -> gated out           (no signal)
+//
+// LOOSE_FLOOR is intentionally LOW. MiniLM clusters single-word queries like
+// "legal" or "corporate" around 0.18–0.32 against prose that never uses the
+// word, so a 0.30 floor wrongly gated them out entirely. At 0.15 those surface
+// (tagged "Loosely related"), at the cost that weak/gibberish queries also
+// return a few low-cosine results — acceptable because the loose tag flags
+// them as a stretch. Tune with the always-on debug readout: watch where real
+// vs nonsense queries land for YOUR corpus and move the floor into the valley
+// between them. Raise it back up if too much noise leaks through.
+const LOOSE_FLOOR = 0.15; // low safety net, not a hard gate — tune via debug
+const RELATED_FLOOR = 0.4; // confident-vs-loose split
 const SEMANTIC_WEIGHT = 1.0;
 const LEXICAL_WEIGHT = 0.9;
 // Substring ranks LOW on purpose: it's a safety net for the gate,
@@ -204,6 +210,12 @@ export default function SemanticFindDemo() {
   });
   // Raw-cosine debug readout, for tuning the floors against real queries.
   const [showDebug, setShowDebug] = useState(false);
+  // Top raw cosine scores from the last search, captured BEFORE gating — so an
+  // empty result list can still show "the best matches were 0.21, 0.19…" and
+  // explain why they were gated. Independent of which results survived.
+  const [topCosines, setTopCosines] = useState<
+    { index: number; cosine: number }[]
+  >([]);
 
   // ---- Long-lived objects kept out of React state -------------
   const extractorRef = useRef<FeatureExtractionPipeline | null>(null);
@@ -301,6 +313,7 @@ export default function SemanticFindDemo() {
     if (!q) {
       const id = setTimeout(() => {
         setResults([]);
+        setTopCosines([]);
         setActiveKeywords([]);
         setActiveNeedle("");
         setOccurrences(0);
@@ -346,6 +359,10 @@ export default function SemanticFindDemo() {
         const cosineMap = new Map<number, number>(
           sem.map((s: Scored) => [s.index, s.score])
         );
+        // Capture the top few raw cosines pre-gating for the debug panel.
+        const topForDebug = sem
+          .slice(0, 5)
+          .map((s: Scored) => ({ index: s.index, cosine: s.score }));
         const semanticOrder = sem.map((s: Scored) => s.index);
 
         // --- Fuse semantic + keyword + substring with weighted RRF ---
@@ -400,6 +417,7 @@ export default function SemanticFindDemo() {
         ];
 
         setResults(gated);
+        setTopCosines(topForDebug);
         setActiveKeywords(allMatchedTerms);
         setActiveNeedle(q);
         setOccurrences(totalOcc);
@@ -670,6 +688,40 @@ export default function SemanticFindDemo() {
           {ready && q && !searching && results.length === 0 && (
             <div className="sf-status">
               <p className="sf-finehint">No results — try different terms.</p>
+              <button
+                type="button"
+                className={`sf-debugtoggle ${showDebug ? "is-on" : ""}`}
+                onClick={() => setShowDebug((s) => !s)}
+                aria-pressed={showDebug}
+                title="Show raw cosine scores for tuning"
+              >
+                debug
+              </button>
+              {showDebug && (
+                <div className="sf-debugpanel">
+                  <p className="sf-debughint">
+                    floors — loose ≥ {LOOSE_FLOOR.toFixed(2)} · related ≥{" "}
+                    {RELATED_FLOOR.toFixed(2)}. Everything below was gated:
+                  </p>
+                  {topCosines.length === 0 ? (
+                    <p className="sf-debughint">no chunks scored.</p>
+                  ) : (
+                    <ul className="sf-debuglist">
+                      {topCosines.map((c) => (
+                        <li key={c.index}>
+                          {chunks[c.index]?.heading || `chunk ${c.index}`} —{" "}
+                          <b>{c.cosine.toFixed(3)}</b>
+                          {c.cosine < LOOSE_FLOOR ? " (below loose floor)" : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="sf-debughint">
+                    If a query you expected to match sits just under the floor,
+                    lower <code>LOOSE_FLOOR</code> in SemanticFindDemo.tsx.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
