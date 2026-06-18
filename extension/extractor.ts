@@ -2,44 +2,50 @@
 // extension/extractor.ts
 // ============================================================
 // Replaces the demo's static `sampleDocument` with real, live page
-// text. Walks the DOM for readable block elements, filters out the
-// hidden / trivial ones, and emits two parallel structures:
+// text. The goal is Ctrl+F parity: index ALL visible text on the page —
+// nav bars, headings, links, buttons, footers, captions, body copy —
+// not just a handful of "article" tags.
 //
+// Strategy: walk every block-level element and take its OWN flow text —
+// the text in its direct text nodes plus any inline descendants
+// (<a>, <span>, <strong>, …). Block-level descendants (<p>, <li>, <div>,
+// …) are NOT folded in; each becomes its own block. That gives two
+// things for free:
+//   - full phrases stay intact across inline markup ("Hello <a>world</a>"
+//     indexes as "Hello world", so a literal/keyword search still hits),
+//   - no duplication: every text node belongs to exactly one block (its
+//     nearest block-level ancestor), so we don't need the old
+//     container-vs-descendant de-dup pass.
+//
+// Emits two parallel structures:
 //   - blocks:        Block[]  (the SAME shape lib/chunk.ts expects)
-//   - elementById:   Map<blockId, Element>  (chunk id -> real node)
+//   - elementById:   Map<blockId, Element>  (block id -> real node)
 //
-// lib/chunk.ts keys every paragraph by `block-${i}` where i is the
-// position in the Block[] array. We keep an element for that exact
-// index, so a chunk's `blockIds` / `anchorId` map straight back to
-// real DOM nodes for scrolling + highlighting. No changes to the
-// shared chunker were needed.
+// lib/chunk.ts keys every block by `block-${i}` (its index in the
+// array); we keep the element for that exact index, so a chunk's
+// `blockIds` / `anchorId` map straight back to real DOM nodes for
+// scrolling + highlighting. No changes to the shared chunker were needed.
 // ============================================================
 
 import { blockId, type Block } from "../lib/chunk";
 
-// Block-level, readable elements. Order matters only for readability;
-// querySelectorAll returns them in document order, which is what we
-// want so chunks read top-to-bottom like the page.
-const SELECTOR = [
-  "article",
-  "main",
-  "p",
-  "li",
-  "h1",
-  "h2",
-  "h3",
-  "h4",
-  "blockquote",
-  "td",
-  "th",
-].join(",");
+// Inline elements hold text that belongs to their block-level parent's
+// flow — they are folded into that parent, never emitted on their own.
+const INLINE_TAGS = new Set([
+  "A", "SPAN", "B", "STRONG", "I", "EM", "U", "S", "SMALL", "SUB", "SUP",
+  "MARK", "ABBR", "TIME", "CITE", "Q", "CODE", "KBD", "SAMP", "VAR", "BDI",
+  "BDO", "DFN", "DATA", "INS", "DEL", "FONT", "TT", "NOBR", "RUBY", "RT",
+  "RP", "WBR", "BR",
+]);
 
-// Headings become section breaks in the chunker; everything else is
-// flowing text. lib/chunk.ts only distinguishes "h2" (break) from
-// "p" (accumulate), so we collapse all heading levels to "h2".
-const HEADING_TAGS = new Set(["H1", "H2", "H3", "H4"]);
+// Elements whose text is not real page content (or isn't text at all).
+const SKIP_TAGS = new Set([
+  "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "TITLE",
+  "SVG", "CANVAS", "IFRAME", "OBJECT", "EMBED", "AUDIO", "VIDEO", "MAP",
+  "SELECT", "OPTION", "DATALIST", "TEXTAREA", "PROGRESS", "METER",
+]);
 
-const MIN_WORDS = 4;
+const HEADING_TAGS = new Set(["H1", "H2", "H3", "H4", "H5", "H6"]);
 
 export interface ExtractResult {
   /** Blocks in the exact shape lib/chunk.ts consumes. */
@@ -50,28 +56,39 @@ export interface ExtractResult {
 
 function isHidden(el: Element): boolean {
   const style = window.getComputedStyle(el);
-  const rect = el.getBoundingClientRect();
-  return (
+  if (
     style.display === "none" ||
     style.visibility === "hidden" ||
-    Number(style.opacity) === 0 ||
-    (rect.width === 0 && rect.height === 0)
-  );
-}
-
-function wordCount(text: string): number {
-  return text.split(/\s+/).filter(Boolean).length;
-}
-
-// Prefer leaf-ish blocks: if an <article>/<main> also contains its own
-// <p>/<li> children that we already extract, indexing the container
-// duplicates all that text. We skip a container when a descendant is
-// also in our candidate set.
-function hasExtractableDescendant(el: Element, candidates: Set<Element>): boolean {
-  for (const child of candidates) {
-    if (child !== el && el.contains(child)) return true;
+    style.visibility === "collapse" ||
+    Number(style.opacity) === 0
+  ) {
+    return true;
   }
-  return false;
+  const rect = el.getBoundingClientRect();
+  return rect.width === 0 && rect.height === 0;
+}
+
+/**
+ * The element's OWN flow text: direct text nodes + the text of inline
+ * descendants, but stopping at block-level descendants (which become
+ * their own blocks). Whitespace-collapsed and trimmed.
+ */
+function ownFlowText(el: Element): string {
+  let out = "";
+  for (const node of Array.from(el.childNodes)) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      out += node.nodeValue ?? "";
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const child = node as Element;
+      // Inline markup is part of this block's flow; pull its whole
+      // subtree text. Block-level children are skipped here — the walk
+      // visits them separately and emits them as their own blocks.
+      if (INLINE_TAGS.has(child.tagName)) {
+        out += child.textContent ?? "";
+      }
+    }
+  }
+  return out.replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -80,37 +97,22 @@ function hasExtractableDescendant(el: Element, candidates: Set<Element>): boolea
  * concern in highlighter.ts).
  */
 export function extractBlocks(root: ParentNode = document): ExtractResult {
-  const all = Array.from(root.querySelectorAll(SELECTOR));
-
-  // First pass: keep elements with enough visible text.
-  const kept = all.filter((el) => {
-    const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-    if (!text) return false;
-    if (wordCount(text) < MIN_WORDS) return false;
-    if (isHidden(el)) return false;
-    // Never index our own overlay.
-    if (el.closest("#semantic-find-extension-root")) return false;
-    return true;
-  });
-
-  const keptSet = new Set(kept);
-
+  const scope = (root as Document).body ?? root;
   const blocks: Block[] = [];
   const elementById = new Map<string, Element>();
 
-  for (const el of kept) {
-    // Drop big wrappers (article/main/li/td) whose text is already
-    // covered by a more specific descendant we also kept.
-    if (hasExtractableDescendant(el, keptSet)) continue;
+  for (const el of Array.from(scope.querySelectorAll("*"))) {
+    if (SKIP_TAGS.has(el.tagName) || INLINE_TAGS.has(el.tagName)) continue;
+    // Never index our own overlay.
+    if (el.closest("#semantic-find-extension-root")) continue;
 
-    const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+    // Cheap text check first; only pay for layout/style on candidates.
+    const text = ownFlowText(el);
+    if (!text) continue;
+    if (isHidden(el)) continue;
+
     const i = blocks.length;
-
-    if (HEADING_TAGS.has(el.tagName)) {
-      blocks.push({ type: "h2", text });
-    } else {
-      blocks.push({ type: "p", text });
-    }
+    blocks.push({ type: HEADING_TAGS.has(el.tagName) ? "h2" : "p", text });
     // lib/chunk.ts will refer to this block as blockId(i).
     elementById.set(blockId(i), el);
   }

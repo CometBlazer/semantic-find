@@ -38,6 +38,12 @@
   display: flex;
 }
 
+/* Docked to the left edge instead of the right (⇄ toggle). */
+.sf-ext-overlay.sf-ext-left {
+  right: auto;
+  left: 16px;
+}
+
 .sf-ext-head {
   display: flex;
   align-items: center;
@@ -62,7 +68,8 @@
 }
 
 .sf-ext-close,
-.sf-ext-dbg {
+.sf-ext-dbg,
+.sf-ext-move {
   border: none;
   background: transparent;
   cursor: pointer;
@@ -74,7 +81,8 @@
 }
 
 .sf-ext-close:hover,
-.sf-ext-dbg:hover {
+.sf-ext-dbg:hover,
+.sf-ext-move:hover {
   background: #f3f4f6;
   color: #111827;
 }
@@ -142,6 +150,18 @@
   height: 8px;
   border-radius: 50%;
   display: inline-block;
+}
+
+.sf-ext-filter-count {
+  min-width: 16px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+  color: #374151;
+  background: #f3f4f6;
+  border-radius: 999px;
 }
 
 .sf-ext-results {

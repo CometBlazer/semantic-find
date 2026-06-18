@@ -39,6 +39,11 @@ type Pending = {
 
 let port: chrome.runtime.Port | null = null;
 let portPromise: Promise<chrome.runtime.Port> | null = null;
+// The worker is loaded per offscreen connection. Tracking the load here
+// means embeds always wait for a "load" on the CURRENT worker — even when
+// chunk vectors came from cache (so the page never called loadModel) or
+// the port reconnected to a fresh worker after a bfcache eviction.
+let modelReady: Promise<{ device: string }> | null = null;
 let nextId = 1;
 const pending = new Map<number, Pending>();
 
@@ -100,10 +105,12 @@ async function getPort(): Promise<chrome.runtime.Port> {
     p.onDisconnect.addListener(() => {
       const reason = chrome.runtime.lastError?.message ?? "offscreen model port disconnected";
       rejectAll(new Error(reason));
-      // Drop the cached port so the next call re-creates the offscreen
-      // document and reconnects.
+      // Drop the cached port (and the model-load tied to it) so the next
+      // call re-creates the offscreen document, reconnects, and re-loads
+      // the model on the fresh worker.
       port = null;
       portPromise = null;
+      modelReady = null;
     });
 
     port = p;
@@ -142,17 +149,33 @@ function call<T>(
   });
 }
 
-/** Load the model in the offscreen document. Passes the bundled WASM base
- *  (an extension-absolute URL, valid in the offscreen origin too) so ORT
+/** Ensure the model is loaded on the current worker before embedding.
+ *  Idempotent: the load runs once per connection (memoized), and the
+ *  worker itself guards re-entry. Passes the bundled WASM base (an
+ *  extension-absolute URL, valid in the offscreen origin too) so ORT
  *  never reaches for remote runtime code. */
+function ensureModel(
+  onProgress?: (p: ModelProgress) => void
+): Promise<{ device: string }> {
+  if (modelReady) return modelReady;
+  const wasmBase = chrome.runtime.getURL("assets/wasm/");
+  modelReady = call<{ device: string }>({ type: "load", wasmBase }, { onProgress });
+  // A failed load shouldn't poison every later attempt — let it retry.
+  modelReady.catch(() => {
+    modelReady = null;
+  });
+  return modelReady;
+}
+
+/** Load the model (with progress) — used to warm it up explicitly. */
 export async function loadModel(
   onProgress?: (p: ModelProgress) => void
 ): Promise<{ device: string }> {
-  const wasmBase = chrome.runtime.getURL("assets/wasm/");
-  return call<{ device: string }>({ type: "load", wasmBase }, { onProgress });
+  return ensureModel(onProgress);
 }
 
 export async function embedText(text: string): Promise<Float32Array> {
+  await ensureModel();
   return call<Float32Array>({ type: "embedOne", text });
 }
 
@@ -160,6 +183,7 @@ export async function embedChunks(
   texts: string[],
   onProgress?: (done: number, total: number) => void
 ): Promise<Float32Array[]> {
+  await ensureModel();
   return call<Float32Array[]>(
     { type: "embedMany", texts },
     { onEmbedProgress: onProgress }

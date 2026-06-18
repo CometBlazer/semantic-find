@@ -69,14 +69,17 @@ function copyStatic() {
   copyFileSync(resolve(ext, "highlight.css"), resolve(out, "highlight.css"));
   copyFileSync(resolve(ext, "offscreen.html"), resolve(out, "offscreen.html"));
 
-  if (existsSync(WASM_SRC)) {
-    copyFileSync(WASM_SRC, resolve(wasmOut, WASM_FILE));
-  } else {
-    console.warn(
-      `\n[build:extension] WARNING: ${WASM_FILE} not found at\n  ${WASM_SRC}\n` +
-        "Semantic search will fail to load its WASM runtime until this " +
-        "file is present. Literal + keyword search still work.\n"
-    );
+  for (const file of WASM_FILES) {
+    const src = resolve(WASM_DIST, file);
+    if (existsSync(src)) {
+      copyFileSync(src, resolve(wasmOut, file));
+    } else {
+      console.warn(
+        `\n[build:extension] WARNING: ${file} not found at\n  ${src}\n` +
+          "Semantic search will fail to load its WASM runtime until this " +
+          "file is present. Literal + keyword search still work.\n"
+      );
+    }
   }
 }
 

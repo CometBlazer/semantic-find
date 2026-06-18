@@ -60,6 +60,11 @@ let searchTimer: number | undefined;
 let semanticTimer: number | undefined;
 let searchSeq = 0;
 let debugOn = false;
+// Which edge the overlay docks to; toggled by the ⇄ header button so it
+// can be moved off whatever it's covering.
+let side: "right" | "left" = "right";
+// Per-category result counts shown on the filter chips.
+const filterCountEls: Partial<Record<Provenance, HTMLElement>> = {};
 
 // =============================================================
 // Overlay construction (Shadow DOM)
@@ -71,6 +76,21 @@ async function ensureOverlay(): Promise<void> {
   host.id = ROOT_ID;
   shadow = host.attachShadow({ mode: "open" });
   document.documentElement.appendChild(host);
+
+  // Some SPAs (e.g. claude.ai) attach GLOBAL keyboard handlers to
+  // document/window that "type to focus" their own composer or fire
+  // shortcuts. Keyboard events are composed:true, so a keystroke in our
+  // shadow-DOM input bubbles out into the host page and triggers those
+  // handlers — which steal the character into their text box even though
+  // our input has focus. Stop overlay-originated key/input events from
+  // escaping the host. These run in the BUBBLE phase (default), so our
+  // own input + onInputKeyDown have already handled the event by the time
+  // we halt it; we only prevent it reaching the page's listeners. We do
+  // NOT preventDefault, so typing into our input still works normally.
+  const swallow = (e: Event) => e.stopPropagation();
+  for (const type of ["keydown", "keypress", "keyup", "beforeinput", "input"]) {
+    host.addEventListener(type, swallow);
+  }
 
   // Inject the overlay stylesheet into the shadow root. It's bundled
   // into content.js as text (esbuild `text` loader), so there's no
@@ -87,6 +107,10 @@ async function ensureOverlay(): Promise<void> {
   const header = h("div", "sf-ext-head");
   const title = h("span", "sf-ext-title", "Semantic Find");
   const status = h("span", "sf-ext-status");
+  const move = h("button", "sf-ext-move", "⇄");
+  move.setAttribute("aria-label", "Move to other side");
+  move.title = "Move the panel to the other side of the page";
+  move.addEventListener("click", () => toggleSide());
   const dbg = h("button", "sf-ext-dbg", "🐞");
   dbg.setAttribute("aria-label", "Toggle debug info");
   dbg.title = "Toggle debug info (chunk/anchor/block mapping)";
@@ -98,7 +122,7 @@ async function ensureOverlay(): Promise<void> {
   const close = h("button", "sf-ext-close", "✕");
   close.setAttribute("aria-label", "Close");
   close.addEventListener("click", () => closeOverlay());
-  header.append(title, status, dbg, close);
+  header.append(title, status, move, dbg, close);
 
   const input = document.createElement("input");
   input.className = "sf-ext-input";
@@ -117,6 +141,16 @@ async function ensureOverlay(): Promise<void> {
 
   els = { panel, input, status, meta, list, filters };
   buildFilters();
+  applySide();
+}
+
+function applySide(): void {
+  els?.panel.classList.toggle("sf-ext-left", side === "left");
+}
+
+function toggleSide(): void {
+  side = side === "right" ? "left" : "right";
+  applySide();
 }
 
 function h(tag: string, className: string, text?: string): HTMLElement {
@@ -139,8 +173,32 @@ function buildFilters(): void {
       renderResults(lastResults);
     });
     const dot = h("span", `sf-ext-dot ${PROVENANCE_META[tag].className}`);
-    label.append(box, dot, document.createTextNode(PROVENANCE_META[tag].label));
+    const count = h("span", "sf-ext-filter-count", "0");
+    filterCountEls[tag] = count;
+    label.append(
+      box,
+      dot,
+      document.createTextNode(PROVENANCE_META[tag].label),
+      count
+    );
     els.filters.append(label);
+  }
+}
+
+/** Per-category breakdown shown on the filter chips. Counts come from the
+ *  full result set (not the visible subset) so a hidden category still
+ *  shows how many it's hiding. */
+function updateFilterCounts(results: SearchResult[]): void {
+  const counts: Record<Provenance, number> = {
+    exact: 0,
+    close: 0,
+    related: 0,
+    loose: 0,
+  };
+  for (const r of results) counts[r.provenance]++;
+  for (const tag of PROVENANCE_ORDER) {
+    const el = filterCountEls[tag];
+    if (el) el.textContent = String(counts[tag]);
   }
 }
 
@@ -166,9 +224,16 @@ function closeOverlay(): void {
   if (els) els.panel.classList.remove("sf-ext-open");
 }
 
-function toggleOverlay(): void {
-  if (isOpen) closeOverlay();
-  else void openOverlay();
+// The open shortcut (and toolbar icon) never CLOSES the overlay — only
+// Escape or the ✕ button does. When it's already open, re-focus and
+// select the query so the user can immediately type the next search.
+function activateOverlay(): void {
+  if (isOpen) {
+    els?.input.focus();
+    els?.input.select();
+  } else {
+    void openOverlay();
+  }
 }
 
 // =============================================================
@@ -201,6 +266,9 @@ async function warmSemantic(): Promise<void> {
       page.setVectors(cached);
       modelState = "ready";
       setStatus(`${page.chunkCount} sections · semantic ready (cached)`);
+      // Chunk vectors are cached, but embedding the QUERY still needs the
+      // model — warm it in the background so the first search isn't slow.
+      void loadModel().catch(() => {});
       if (isOpen && lastQuery) scheduleSearch();
       return;
     }
@@ -311,6 +379,7 @@ function renderMeta(out: {
 
 function renderResults(results: SearchResult[]): void {
   if (!els || !page) return;
+  updateFilterCounts(results);
   els.list.replaceChildren();
   const shown = results.filter((r) => visibleTags[r.provenance]);
 
@@ -490,7 +559,7 @@ window.addEventListener(
   (e) => {
     if (e.altKey && e.shiftKey && e.key.toLowerCase() === "k") {
       e.preventDefault();
-      toggleOverlay();
+      activateOverlay();
     } else if (isOpen && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
       els?.input.focus();
@@ -504,5 +573,5 @@ window.addEventListener(
 // Message from the background service worker (toolbar / command)
 // =============================================================
 chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === "TOGGLE_SEMANTIC_FIND") toggleOverlay();
+  if (message?.type === "TOGGLE_SEMANTIC_FIND") activateOverlay();
 });
