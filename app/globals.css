@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    app/globals.css
    ============================================================
    Two visual layers, deliberately distinct:
@@ -19,9 +19,9 @@
   --ink-soft: #6d685f;
   --rule: #e6e3da;
 
-  --cobalt: #2742c7;        /* finder accent */
+  --cobalt: #2742c7;
   --cobalt-soft: #eef1fd;
-  --hit: #ffe45e;           /* match highlight */
+  --hit: #ffe45e;
   --hit-wash: #fff6c9;
 
   --overlay-bg: #ffffff;
@@ -54,7 +54,7 @@ body {
   margin: 0;
   background: var(--paper);
   color: var(--ink);
-  font-family: var(--font-doc), Georgia, serif;
+  font-family: var(--font-doc, Georgia, serif);
 }
 
 .sf-booting {
@@ -313,6 +313,9 @@ body {
 /* ---------- Results ---------- */
 
 .sf-results {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
   list-style: none;
   margin: 0;
   padding: 0 0.5rem 0.6rem;
@@ -400,6 +403,9 @@ body {
 /* ---------- Ctrl+F-style occurrence count ---------- */
 
 .sf-countbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
   padding: 0 0.9rem 0.55rem;
   font-size: 0.74rem;
   line-height: 1.4;
@@ -621,51 +627,4 @@ body {
   * {
     transition: none !important;
   }
-}
-
-/* ============================================================
-   Results gap + count-breakdown additions
-   ------------------------------------------------------------
-   Append to the END of app/globals.css. Adds vertical spacing
-   between result cards and styles the new count summary line
-   (total results + per-category breakdown) in the count bar.
-   ============================================================ */
-
-/* ---------- Nonzero gap between result cards ---------- */
-
-.sf-results {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;            /* the requested breathing room between results */
-}
-
-/* ---------- Count summary: total + breakdown + literal line ---------- */
-
-.sf-countbar {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-}
-
-.sf-countline {
-  font-weight: 600;
-  color: var(--ink);
-}
-
-.sf-countbreakdown {
-  font-weight: 400;
-  color: var(--ink-soft);
-}
-
-.sf-countbreakdown::before {
-  content: " — ";
-  color: var(--ink-soft);
-}
-
-.sf-countpart {
-  white-space: nowrap;
-}
-
-.sf-countliteral {
-  color: var(--ink-soft);
 }
