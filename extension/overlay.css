@@ -1,35 +1,16 @@
 /* ============================================================
    extension/overlay.css
    ============================================================
-   Two audiences in one file:
+   OVERLAY UI styles, scoped to the Shadow Root. content.ts imports
+   this file as text at build time (esbuild's `text` loader) and injects
+   it into the shadow root via a <style> tag — page CSS does NOT pierce
+   shadow DOM, and fetching it at runtime would require it to be a
+   web-accessible resource, so bundling is the robust path.
 
-   1. PAGE-LEVEL rules (.semantic-find-active-result, mark[data-sf-mark])
-      are loaded onto the host document by the manifest's
-      content_scripts.css, so highlighter.ts can light up real page
-      elements. These are scoped by their own class names and use
-      !important to survive aggressive host stylesheets.
-
-   2. OVERLAY UI rules (.sf-ext-*) are injected into the Shadow Root by
-      content.ts (content_scripts.css does NOT pierce shadow DOM). Inside
-      the shadow root there's no host-page bleed, so these stay simple.
+   Page-level highlight rules live in highlight.css (loaded onto the host
+   document by the manifest's content_scripts.css).
    ============================================================ */
 
-/* ---------- 1. Page-level highlight ---------- */
-.semantic-find-active-result {
-  outline: 2px solid #f59e0b !important;
-  background: rgba(245, 158, 11, 0.15) !important;
-  scroll-margin: 96px !important;
-  transition: background 0.2s ease !important;
-}
-
-mark[data-sf-mark] {
-  background: #fde68a !important;
-  color: inherit !important;
-  padding: 0 1px !important;
-  border-radius: 2px !important;
-}
-
-/* ---------- 2. Overlay UI (shadow root) ---------- */
 :host {
   all: initial;
 }
@@ -80,7 +61,8 @@ mark[data-sf-mark] {
   white-space: nowrap;
 }
 
-.sf-ext-close {
+.sf-ext-close,
+.sf-ext-dbg {
   border: none;
   background: transparent;
   cursor: pointer;
@@ -91,9 +73,29 @@ mark[data-sf-mark] {
   border-radius: 6px;
 }
 
-.sf-ext-close:hover {
+.sf-ext-close:hover,
+.sf-ext-dbg:hover {
   background: #f3f4f6;
   color: #111827;
+}
+
+.sf-ext-dbg.sf-ext-dbg-on {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.sf-ext-debug {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #475569;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
 }
 
 .sf-ext-input {

@@ -20,6 +20,10 @@ import { highlightElement, clearHighlights } from "./highlighter";
 import { loadModel, embedText, embedChunks, MODEL_ID } from "./embedding-client";
 import { PROVENANCE_META, PROVENANCE_ORDER, type Provenance } from "../lib/provenance";
 import { loadEmbeddings, saveEmbeddings } from "../lib/cache";
+import type { Chunk } from "../lib/chunk";
+// Bundled as a string by esbuild's `text` loader and injected into the
+// shadow root — page CSS can't reach (or break) the overlay UI.
+import overlayCss from "./overlay.css";
 
 const ROOT_ID = "semantic-find-extension-root";
 const SEARCH_DEBOUNCE_MS = 120;
@@ -55,6 +59,7 @@ const visibleTags: Record<Provenance, boolean> = {
 let searchTimer: number | undefined;
 let semanticTimer: number | undefined;
 let searchSeq = 0;
+let debugOn = false;
 
 // =============================================================
 // Overlay construction (Shadow DOM)
@@ -67,17 +72,12 @@ async function ensureOverlay(): Promise<void> {
   shadow = host.attachShadow({ mode: "open" });
   document.documentElement.appendChild(host);
 
-  // Pull the bundled stylesheet into the shadow root. content_scripts
-  // CSS lands on the page document and does NOT pierce shadow DOM, so
-  // we inject the same file's text here for the overlay UI itself.
+  // Inject the overlay stylesheet into the shadow root. It's bundled
+  // into content.js as text (esbuild `text` loader), so there's no
+  // fetch to be blocked and no host-page CSS bleed. content_scripts
+  // CSS (highlight.css) styles the PAGE, not this shadow root.
   const style = document.createElement("style");
-  try {
-    style.textContent = await fetch(chrome.runtime.getURL("overlay.css")).then(
-      (r) => r.text()
-    );
-  } catch {
-    /* overlay still works unstyled if the fetch is blocked */
-  }
+  style.textContent = overlayCss;
   shadow.appendChild(style);
 
   const panel = h("div", "sf-ext-overlay");
@@ -87,10 +87,18 @@ async function ensureOverlay(): Promise<void> {
   const header = h("div", "sf-ext-head");
   const title = h("span", "sf-ext-title", "Semantic Find");
   const status = h("span", "sf-ext-status");
+  const dbg = h("button", "sf-ext-dbg", "🐞");
+  dbg.setAttribute("aria-label", "Toggle debug info");
+  dbg.title = "Toggle debug info (chunk/anchor/block mapping)";
+  dbg.addEventListener("click", () => {
+    debugOn = !debugOn;
+    dbg.classList.toggle("sf-ext-dbg-on", debugOn);
+    renderResults(lastResults);
+  });
   const close = h("button", "sf-ext-close", "✕");
   close.setAttribute("aria-label", "Close");
   close.addEventListener("click", () => closeOverlay());
-  header.append(title, status, close);
+  header.append(title, status, dbg, close);
 
   const input = document.createElement("input");
   input.className = "sf-ext-input";
@@ -216,7 +224,13 @@ async function warmSemantic(): Promise<void> {
     if (isOpen && lastQuery) scheduleSearch();
   } catch (err) {
     modelState = "failed";
-    console.warn("[semantic-find] semantic model unavailable:", err);
+    // DOMExceptions/ErrorEvents stringify to "[object DOMException]" and
+    // hide the cause — pull out name + message so the console is useful.
+    console.warn(
+      "[semantic-find] semantic model unavailable:",
+      describeError(err),
+      err
+    );
     setStatus("Semantic model failed — literal & keyword search only");
   }
 }
@@ -261,7 +275,7 @@ async function runSearch(): Promise<void> {
         renderMeta(full);
         renderResults(full.results);
       } catch (err) {
-        console.warn("[semantic-find] query embed failed:", err);
+        console.warn("[semantic-find] query embed failed:", describeError(err), err);
       }
     }, SEMANTIC_DEBOUNCE_MS);
   }
@@ -317,6 +331,7 @@ function renderResults(results: SearchResult[]): void {
     const snippet = h("p", "sf-ext-snippet", snippetFor(chunk.text, els!.input.value));
 
     li.append(tag, head, snippet);
+    if (debugOn) li.append(buildDebug(r, chunk));
     li.addEventListener("click", () => {
       activeIdx = i;
       jumpTo(i);
@@ -324,6 +339,26 @@ function renderResults(results: SearchResult[]): void {
     });
     els!.list.append(li);
   });
+}
+
+/** Per-result diagnostics: the exact chunk/anchor/block mapping and a
+ *  preview of the element we'd actually scroll to, so a "wrong section"
+ *  jump is visible at a glance. Toggled by the 🐞 button. */
+function buildDebug(r: SearchResult, chunk: Chunk): HTMLElement {
+  const target = resolveChunkTarget(chunk, els?.input.value ?? "");
+  const elPreview = target.el
+    ? `«${(target.el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80)}»`
+    : "(element not found)";
+  const lines = [
+    `chunk id   : ${r.index}`,
+    `anchor id  : ${chunk.anchorId}`,
+    `target id  : ${target.blockId}${target.matched ? " (query match)" : " (anchor fallback)"}`,
+    `block ids  : ${chunk.blockIds.join(", ")}`,
+    `cosine/rrf : ${r.cosine.toFixed(3)} / ${r.score.toFixed(4)}`,
+    `element    : ${elPreview}`,
+    `snippet    : ${snippetFor(chunk.text, els?.input.value ?? "").slice(0, 80)}`,
+  ];
+  return h("pre", "sf-ext-debug", lines.join("\n"));
 }
 
 function snippetFor(text: string, query: string): string {
@@ -353,16 +388,75 @@ function setStatus(text: string): void {
   if (els) els.status.textContent = text;
 }
 
+/** DOMException/ErrorEvent print as "[object …]" by default, swallowing
+ *  the actual cause. Extract a human-readable "Name: message" string. */
+function describeError(err: unknown): string {
+  if (err instanceof Error || err instanceof DOMException) {
+    return `${err.name}: ${err.message}`;
+  }
+  if (err && typeof err === "object") {
+    const e = err as { name?: string; message?: string };
+    if (e.name || e.message) return `${e.name ?? "Error"}: ${e.message ?? ""}`;
+  }
+  return String(err);
+}
+
 // =============================================================
 // Jump to result on the real page
 // =============================================================
+
+/**
+ * Map a chunk back to the DOM element to scroll to. A chunk can span
+ * several paragraphs (~150 words), and the result snippet usually shows
+ * the block where the query matched — NOT necessarily the chunk's first
+ * block. So we scroll to the first block whose element actually contains
+ * the literal query; only if none does (e.g. a semantic-only match with
+ * no shared words) do we fall back to the chunk's anchor block.
+ *
+ * Every id here (chunk.anchorId, chunk.blockIds) is the SAME id used as
+ * the key in extraction.elementById, because both come from the one
+ * blocks array produced by extractor.ts and consumed by lib/chunk.ts.
+ */
+function resolveChunkTarget(
+  chunk: Chunk,
+  needle: string
+): { el: Element | null; blockId: string; matched: boolean } {
+  const n = needle.trim().toLowerCase();
+  if (n && extraction) {
+    for (const id of chunk.blockIds) {
+      const el = extraction.elementById.get(id);
+      if (el && (el.textContent ?? "").toLowerCase().includes(n)) {
+        return { el, blockId: id, matched: true };
+      }
+    }
+  }
+  const el = extraction?.elementById.get(chunk.anchorId) ?? null;
+  return { el, blockId: chunk.anchorId, matched: false };
+}
+
 function jumpTo(visibleIdx: number): void {
   if (!page || !extraction) return;
   const r = visibleResults()[visibleIdx];
   if (!r) return;
   const chunk = page.chunks[r.index];
-  const el = extraction.elementById.get(chunk.anchorId);
-  if (el) highlightElement(el, els?.input.value);
+  const needle = els?.input.value ?? "";
+  const target = resolveChunkTarget(chunk, needle);
+
+  console.debug("[semantic-find] jump", {
+    chunkId: r.index,
+    anchorId: chunk.anchorId,
+    targetBlockId: target.blockId,
+    matchedBlock: target.matched,
+    blockIds: chunk.blockIds,
+    provenance: r.provenance,
+    cosine: Number(r.cosine.toFixed(3)),
+    elementText: target.el
+      ? (target.el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 120)
+      : null,
+    snippet: snippetFor(chunk.text, needle),
+  });
+
+  if (target.el) highlightElement(target.el, needle);
 }
 
 // =============================================================

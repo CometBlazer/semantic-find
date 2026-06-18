@@ -15,9 +15,13 @@
 //                                                cannot use ES imports)
 //   background.ts        -> background.js        (ESM — manifest declares
 //                                                the worker type:module)
-//   embedding.worker.ts  -> embedding.worker.js  (ESM module worker; this
-//                                                is the only bundle that
-//                                                pulls in transformers.js)
+//   embedding.worker.ts  -> embedding.worker.js  (IIFE classic worker;
+//                                                module workers can't be
+//                                                spawned from a content
+//                                                script's page origin in
+//                                                MV3. This is the only
+//                                                bundle pulling in
+//                                                transformers.js.)
 //   offscreen.ts         -> offscreen.js         (ESM — Option B stub)
 //
 // Static files (manifest, overlay.css, offscreen.html) and the ONNX
@@ -55,7 +59,10 @@ const WASM_SRC = resolve(
 function copyStatic() {
   mkdirSync(wasmOut, { recursive: true });
   copyFileSync(resolve(ext, "manifest.json"), resolve(out, "manifest.json"));
-  copyFileSync(resolve(ext, "overlay.css"), resolve(out, "overlay.css"));
+  // Page-level highlight CSS is loaded onto the host document by the
+  // manifest. The overlay UI CSS is NOT copied — it's bundled into
+  // content.js as text and injected into the shadow root.
+  copyFileSync(resolve(ext, "highlight.css"), resolve(out, "highlight.css"));
   copyFileSync(resolve(ext, "offscreen.html"), resolve(out, "offscreen.html"));
 
   if (existsSync(WASM_SRC)) {
@@ -105,6 +112,9 @@ const configs = [
     entryPoints: { content: resolve(ext, "content.ts") },
     outdir: out,
     format: "iife",
+    // Overlay CSS is imported as a string and injected into the shadow
+    // root (content.ts), so it can't be broken by host-page styles.
+    loader: { ".css": "text" },
     plugins: [staticAssets],
   },
   {
@@ -120,7 +130,9 @@ const configs = [
     ...shared,
     entryPoints: { "embedding.worker": resolve(ext, "embedding.worker.ts") },
     outdir: out,
-    format: "esm",
+    // Classic worker (see embedding-client.ts): module workers can't be
+    // constructed from a content script's page origin in MV3.
+    format: "iife",
   },
 ];
 

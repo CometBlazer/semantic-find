@@ -36,11 +36,17 @@ const pending = new Map<number, Pending>();
 function getWorker(): Worker {
   if (worker) return worker;
 
-  // Loaded as a module worker from the extension origin so it can
-  // import the bundled transformers.js and reach the Hub via the
+  // Loaded as a CLASSIC worker from the extension origin. A content
+  // script runs in the host page's origin, and Chrome (MV3) refuses to
+  // construct a *module* worker from a chrome-extension:// URL in that
+  // context — it throws "SecurityError: ... cannot be accessed from
+  // origin" even when the script is web-accessible. Classic workers from
+  // web_accessible_resources are allowed, and esbuild bundles the worker
+  // (transformers.js included) into one self-contained IIFE, so no
+  // runtime ES imports are needed. The Hub is still reachable via the
   // extension's host permissions.
   const url = chrome.runtime.getURL("embedding.worker.js");
-  worker = new Worker(url, { type: "module" });
+  worker = new Worker(url);
 
   worker.onmessage = (e: MessageEvent) => {
     const m = e.data as {
@@ -88,8 +94,22 @@ function getWorker(): Worker {
         break;
     }
   };
-  worker.onerror = (e) => {
-    for (const [, p] of pending) p.reject(new Error(e.message || "worker crashed"));
+  // Surface as much as the browser gives us. For a worker that fails to
+  // load/parse, `message` is often blank (cross-origin sanitized), but
+  // `filename`/`lineno` and `error` usually pinpoint it.
+  worker.onerror = (e: ErrorEvent) => {
+    const where = e.filename ? ` @ ${e.filename}:${e.lineno}:${e.colno}` : "";
+    const inner =
+      e.error instanceof Error ? `${e.error.name}: ${e.error.message}` : "";
+    const msg = e.message || inner || "worker crashed (no message)";
+    const err = new Error(`worker error: ${msg}${where}`);
+    for (const [, p] of pending) p.reject(err);
+    pending.clear();
+  };
+  // Fires when a posted message can't be deserialized (structured clone).
+  worker.onmessageerror = (e: MessageEvent) => {
+    const err = new Error(`worker message deserialization failed: ${String(e.data)}`);
+    for (const [, p] of pending) p.reject(err);
     pending.clear();
   };
   return worker;
