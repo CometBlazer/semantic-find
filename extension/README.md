@@ -84,9 +84,21 @@ Find* → `Alt+Shift+K`. You can also click the toolbar icon to toggle.
 | `refnd`                      | fuzzy / typo → tagged **Close**            |
 | `the part about cancelling`  | semantic paraphrase → **Related**/**Loose**|
 
-`Esc` closes · `↑`/`↓` move selection · `Enter` jumps to the selected
-result · clicking a result jumps + highlights it on the page · `⇄` (header)
-moves the panel to the other edge when it covers what you're reading.
+### Controls
+
+| Key / action            | Effect                                                |
+| ----------------------- | ----------------------------------------------------- |
+| `Alt+Shift+K`           | open the finder (or, if open, re-focus + select query) |
+| `Esc`                   | close the finder (the only close shortcut)            |
+| `↑` / `↓`               | move the result selection                             |
+| `Enter`                 | jump to + highlight the selected result               |
+| click a result          | jump to + highlight it on the page                    |
+| `Alt+Shift+←`           | dock the panel to the **left** edge                   |
+| `Alt+Shift+→`           | dock the panel to the **right** edge                  |
+| `⇄` (header button)     | toggle the panel between left / right edges           |
+
+The finder stays open until you press `Esc` — `Alt+Shift+K` while it's
+already open just re-selects the query so you can type the next search.
 
 The header shows the **total result count**, and each provenance filter
 chip carries a live **per-category count** (Exact / Close / Related /
@@ -109,7 +121,8 @@ Loose) so you can see the breakdown and toggle categories on/off.
   textHash`).
 - Scroll-to + on-page highlight (element halo + reversible literal
   `<mark>`s), cleaned up on close / query change.
-- Movable panel (left/right) so results never permanently block content.
+- Movable panel (left/right via the `⇄` button or `Alt+Shift+←`/`→`) so
+  results never permanently block what you're reading.
 - Graceful degradation: if the model fails to load, literal + keyword
   search still work.
 
@@ -151,6 +164,10 @@ arrays (rebuilt into `Float32Array`s on the content side).
   `<all_urls>` host permission. To go fully offline, bundle the weights
   under `assets/models/Xenova/all-MiniLM-L6-v2/` and set
   `env.allowRemoteModels = false` + `env.localModelPath` in the worker.
+- During that first download transformers.js may log "Unable to determine
+  content-length…" — a benign note (the HF CDN streams without a
+  `Content-Length` header). The download still succeeds; the worker mutes
+  just that one line so it doesn't clutter the console.
 
 ## Known limitations / next steps
 

@@ -34,6 +34,25 @@ import {
 
 const MODEL_ID = "Xenova/all-MiniLM-L6-v2";
 
+// transformers.js logs a benign console.warn while downloading a model
+// file whose response has no Content-Length header (the HF CDN streams
+// with chunked encoding): "Unable to determine content-length…". The
+// download still succeeds — it just grows its buffer as bytes arrive.
+// Mute only that one known-benign line so it doesn't clutter the console;
+// every other warning still logs untouched.
+{
+  const realWarn = console.warn.bind(console);
+  console.warn = (...args: unknown[]) => {
+    if (
+      typeof args[0] === "string" &&
+      args[0].includes("Unable to determine content-length")
+    ) {
+      return;
+    }
+    realWarn(...args);
+  };
+}
+
 type Device = "webgpu" | "wasm";
 
 let extractor: FeatureExtractionPipeline | null = null;

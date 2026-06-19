@@ -64,7 +64,14 @@ chrome.runtime.onConnect.addListener((port) => {
 
   // Inbound (load / embedOne / embedMany) carries no buffers — forward it.
   port.onMessage.addListener((msg) => worker.postMessage(msg));
-  port.onDisconnect.addListener(() => worker.terminate());
+  port.onDisconnect.addListener(() => {
+    // Read lastError to acknowledge it. The content page can be frozen into
+    // the back/forward cache, which closes this port and sets lastError;
+    // leaving it unread logs an "Unchecked runtime.lastError" warning. The
+    // disconnect itself is expected — just tear the worker down.
+    void chrome.runtime.lastError;
+    worker.terminate();
+  });
 });
 
 console.debug("[semantic-find] offscreen model host ready");

@@ -109,7 +109,8 @@ async function ensureOverlay(): Promise<void> {
   const status = h("span", "sf-ext-status");
   const move = h("button", "sf-ext-move", "⇄");
   move.setAttribute("aria-label", "Move to other side");
-  move.title = "Move the panel to the other side of the page";
+  move.title =
+    "Move the panel to the other side (Alt+Shift+← / Alt+Shift+→)";
   move.addEventListener("click", () => toggleSide());
   const dbg = h("button", "sf-ext-dbg", "🐞");
   dbg.setAttribute("aria-label", "Toggle debug info");
@@ -148,9 +149,13 @@ function applySide(): void {
   els?.panel.classList.toggle("sf-ext-left", side === "left");
 }
 
-function toggleSide(): void {
-  side = side === "right" ? "left" : "right";
+function setSide(next: "right" | "left"): void {
+  side = next;
   applySide();
+}
+
+function toggleSide(): void {
+  setSide(side === "right" ? "left" : "right");
 }
 
 function h(tag: string, className: string, text?: string): HTMLElement {
@@ -560,6 +565,14 @@ window.addEventListener(
     if (e.altKey && e.shiftKey && e.key.toLowerCase() === "k") {
       e.preventDefault();
       activateOverlay();
+    } else if (e.altKey && e.shiftKey && e.key === "ArrowLeft") {
+      // Dock the panel to the left edge.
+      e.preventDefault();
+      setSide("left");
+    } else if (e.altKey && e.shiftKey && e.key === "ArrowRight") {
+      // Dock the panel to the right edge.
+      e.preventDefault();
+      setSide("right");
     } else if (isOpen && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
       els?.input.focus();
