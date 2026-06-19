@@ -18,7 +18,7 @@
 // ============================================================
 
 import type { Email } from "@/components/sampleEmails";
-import type { FusedResult } from "@/lib/vector";
+import type { Provenance } from "@/lib/provenance";
 
 /**
  * Text fed to the embedding model for one email. We lead with the
@@ -68,16 +68,6 @@ export type SortMode = "best" | "recent";
  */
 export const RECENT_RELEVANCE_FLOOR = 0.5;
 
-/**
- * Absolute cosine floor for "does this query match anything at all?".
- * Cosine is comparable across queries (unlike the fused RRF score), so
- * if the BEST email's cosine is below this AND no keyword landed, the
- * query is treated as matching nothing ("Elon Musk" in a support inbox).
- * Tune against your corpus: good matches ~0.4–0.6, nonsense ~0.05–0.2,
- * so somewhere in the valley (~0.25–0.3) works.
- */
-export const NO_MATCH_FLOOR = 0.15;
-
 export interface RankedEmail {
   email: Email;
   /** Fused hybrid relevance score (only order is meaningful). */
@@ -87,30 +77,30 @@ export interface RankedEmail {
   cosine: number;
   /** Original index into the corpus / vector array. */
   index: number;
+  /** Which signals fired → the colored tag (Exact / Close / Related / Loose). */
+  provenance: Provenance;
+  /** Stemmed doc terms that matched lexically — used for highlighting. */
+  matchedTerms: string[];
+  /** Literal substring occurrences in this email's searchable text (0 if none). */
+  substringCount: number;
 }
 
 /**
- * Turn fused ranker output into a sorted list of emails.
+ * Apply the Best / Recent sort to an already-built, already-gated list
+ * of ranked emails (the caller does the 3-signal fusion, gating and
+ * provenance classification — same hybrid core as the document finder
+ * and the extension).
  *
- * - "best":   straight relevance order (what RRF already gives).
- * - "recent": keep results within RECENT_RELEVANCE_FLOOR of the
- *             best score, then sort those newest-first. When the
- *             most relevant email is also the newest, the two
- *             modes coincide — which is the behaviour you noticed.
+ * - "best":   straight relevance order (what RRF already gives — the
+ *             list arrives RRF-sorted, so element 0 is the strongest).
+ * - "recent": keep results within RECENT_RELEVANCE_FLOOR of the best
+ *             score, then sort those newest-first. When the most
+ *             relevant email is also the newest, the two modes coincide.
  */
 export function sortRankedEmails(
-  fused: FusedResult[],
-  emails: Email[],
-  mode: SortMode,
-  cosineByIndex: Map<number, number>
+  ranked: RankedEmail[],
+  mode: SortMode
 ): RankedEmail[] {
-  const ranked: RankedEmail[] = fused.map((r) => ({
-    email: emails[r.index],
-    score: r.score,
-    cosine: cosineByIndex.get(r.index) ?? 0,
-    index: r.index,
-  }));
-
   if (mode === "best") return ranked;
 
   // recent: relevance gate, then newest-first.

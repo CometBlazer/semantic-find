@@ -446,7 +446,7 @@ export default function SemanticFindDemo() {
   // ---- Keyboard shortcuts -------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      if (e.altKey && e.shiftKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setOpen(true);
         inputRef.current?.focus();
@@ -560,7 +560,7 @@ export default function SemanticFindDemo() {
       {/* ---------- Floating semantic-find overlay ---------- */}
       {!open && (
         <button className="sf-fab" onClick={() => setOpen(true)}>
-          Semantic find <kbd>⌘K</kbd>
+          Semantic find <kbd>Alt+Shift+K</kbd>
         </button>
       )}
 

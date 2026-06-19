@@ -1,0 +1,39 @@
+/* ============================================================
+   extension/highlight.css
+   ============================================================
+   PAGE-LEVEL styles only. Loaded onto the host document by the
+   manifest's content_scripts.css so highlighter.ts can light up real
+   page elements. Scoped by their own class/attribute names and marked
+   !important so they survive aggressive host stylesheets.
+
+   The overlay's own UI styles live in overlay.css, which is bundled as
+   text into content.js and injected into the Shadow Root (page CSS,
+   including this file, does NOT pierce shadow DOM).
+   ============================================================ */
+
+.semantic-find-active-result {
+  outline: 2px solid #f59e0b !important;
+  background: rgba(245, 158, 11, 0.15) !important;
+  scroll-margin: 96px !important;
+  transition: background 0.2s ease !important;
+}
+
+mark[data-sf-mark] {
+  background: #fde68a !important;
+  color: inherit !important;
+  padding: 0 1px !important;
+  border-radius: 2px !important;
+}
+
+/* Live Ctrl+F highlighting via the CSS Custom Highlight API (live-find.ts).
+   These paint text ranges with no DOM mutation. ::highlight() only accepts
+   a handful of properties (background-color, color, text-decoration…). */
+::highlight(sf-find) {
+  background-color: #fde68a;
+  color: #000;
+}
+
+::highlight(sf-find-current) {
+  background-color: #f59e0b;
+  color: #000;
+}

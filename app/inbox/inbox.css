@@ -404,6 +404,41 @@
   white-space: pre-wrap;
 }
 
+/* ---------- Provenance tag (Exact / Close / Related / Loose) ---------- */
+/* Mirrors the document finder's tag classes, restyled for the ib- palette.
+   Shares the metric/uppercase look of .ib-tag but is colour-coded by which
+   signals fired for the result. */
+.ib-prov {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 0.12rem 0.4rem;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.ib-prov-exact {
+  color: #2e6b3e;
+  background: #e3f2e6;
+  border-color: #bfe0c6;
+}
+.ib-prov-close {
+  color: #7a5a17;
+  background: #fbf0d6;
+  border-color: #ecdca6;
+}
+.ib-prov-related {
+  color: var(--signal);
+  background: var(--signal-soft);
+  border-color: #c2d2ea;
+}
+.ib-prov-loose {
+  color: var(--ink-soft);
+  background: var(--paper);
+  border-color: var(--line);
+}
+
 /* ---------- Keyword highlight ---------- */
 .ib-kw {
   background: var(--mark);

@@ -1,0 +1,248 @@
+/* ============================================================
+   extension/overlay.css
+   ============================================================
+   OVERLAY UI styles, scoped to the Shadow Root. content.ts imports
+   this file as text at build time (esbuild's `text` loader) and injects
+   it into the shadow root via a <style> tag — page CSS does NOT pierce
+   shadow DOM, and fetching it at runtime would require it to be a
+   web-accessible resource, so bundling is the robust path.
+
+   Page-level highlight rules live in highlight.css (loaded onto the host
+   document by the manifest's content_scripts.css).
+   ============================================================ */
+
+:host {
+  all: initial;
+}
+
+.sf-ext-overlay {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 2147483647;
+  width: 380px;
+  max-height: 80vh;
+  display: none;
+  flex-direction: column;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: #1f2937;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.sf-ext-overlay.sf-ext-open {
+  display: flex;
+}
+
+/* Docked to the left edge instead of the right (⇄ toggle). */
+.sf-ext-overlay.sf-ext-left {
+  right: auto;
+  left: 16px;
+}
+
+.sf-ext-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.sf-ext-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.sf-ext-status {
+  flex: 1;
+  font-size: 11px;
+  color: #6b7280;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sf-ext-close,
+.sf-ext-dbg,
+.sf-ext-move {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  color: #6b7280;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+
+.sf-ext-close:hover,
+.sf-ext-dbg:hover,
+.sf-ext-move:hover {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.sf-ext-dbg.sf-ext-dbg-on {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.sf-ext-debug {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #475569;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.sf-ext-input {
+  margin: 10px 12px 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #111827;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  outline: none;
+}
+
+.sf-ext-input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.sf-ext-meta {
+  padding: 0 12px 6px;
+  font-size: 11px;
+  color: #6b7280;
+  min-height: 14px;
+}
+
+.sf-ext-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.sf-ext-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #374151;
+  cursor: pointer;
+}
+
+.sf-ext-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.sf-ext-filter-count {
+  min-width: 16px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+  color: #374151;
+  background: #f3f4f6;
+  border-radius: 999px;
+}
+
+.sf-ext-results {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.sf-ext-result {
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.sf-ext-result:hover {
+  background: #f9fafb;
+}
+
+.sf-ext-result.sf-ext-active {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.sf-ext-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-bottom: 4px;
+}
+
+.sf-ext-result-head {
+  display: block;
+  font-weight: 600;
+  font-size: 12px;
+  color: #111827;
+  margin-bottom: 2px;
+}
+
+.sf-ext-snippet {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #4b5563;
+}
+
+.sf-ext-empty {
+  padding: 16px;
+  text-align: center;
+  color: #9ca3af;
+}
+
+/* Provenance colors — shared by filter dots and result tags. */
+.sf-tag-exact {
+  background: #dcfce7;
+  color: #166534;
+}
+.sf-ext-dot.sf-tag-exact {
+  background: #22c55e;
+}
+.sf-tag-close {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.sf-ext-dot.sf-tag-close {
+  background: #3b82f6;
+}
+.sf-tag-related {
+  background: #fef3c7;
+  color: #92400e;
+}
+.sf-ext-dot.sf-tag-related {
+  background: #f59e0b;
+}
+.sf-tag-loose {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+.sf-ext-dot.sf-tag-loose {
+  background: #9ca3af;
+}
