@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Semantic Find",
+  "version": "0.1.0",
+  "description": "Local, semantic, fuzzy, substring-powered find-in-page. No backend, no API keys.",
+  "permissions": ["storage", "activeTab", "scripting", "offscreen"],
+  "host_permissions": ["<all_urls>"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "commands": {
+    "toggle-semantic-find": {
+      "suggested_key": {
+        "default": "Alt+Shift+K",
+        "mac": "Alt+Shift+K",
+        "windows": "Alt+Shift+K",
+        "linux": "Alt+Shift+K"
+      },
+      "description": "Open Semantic Find"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["highlight.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

@@ -20,9 +20,6 @@
 # production
 /build
 
-# chrome extension build output
-/dist-extension
-
 # misc
 .DS_Store
 *.pem
