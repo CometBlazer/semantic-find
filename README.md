@@ -9,7 +9,8 @@ even when it's phrased with completely different words, an exact term like
 like *"f"* or *"grea"* behaves like plain Ctrl+F — matching characters anywhere,
 mid-word included.
 
-The project ships **two demos on the same embedding + fusion core**:
+The project ships **two web demos and a Chrome extension on the same embedding
++ fusion core**:
 
 - **`/`** — a "superpowered Ctrl+F" overlay over one long document. Type a
   meaning, jump to the matching paragraph, see keywords highlighted. The
@@ -17,24 +18,31 @@ The project ships **two demos on the same embedding + fusion core**:
   tags each result by provenance (Exact / Close / Related / Loosely related).
 - **`/inbox`** — searching and filtering a **stack of emails**. A prominent
   search bar filters many email JSON blocks down to the matches, with a
-  Best-match / Most-recent toggle, expandable cards, and a relevance spine.
+  Best-match / Most-recent toggle, expandable cards, a relevance spine, and a
+  provenance tag (Exact / Close / Related / Loosely related) on every result.
+- **`extension/`** — a real **MV3 Chrome extension** that runs the same search
+  over the live DOM of any page (`Alt+Shift+K`). It adds a true live-DOM Ctrl+F
+  layer on top of the ranked search, runs the embedding model in an offscreen
+  document, and works offline once the model is cached. See
+  [`extension/README.md`](extension/README.md) for the full writeup.
 
-Both reuse the same embedding pipeline, cosine ranking, and RRF fusion; the
-document finder adds a literal substring layer on top. The data shape and UI
-differ per demo.
+All three surfaces run the **same three-signal hybrid core** — substring +
+keyword + semantic, fused with weighted RRF and labelled by provenance. The data
+shape and UI differ per surface; the search brain does not.
 
 - Next.js App Router + TypeScript
 - `@huggingface/transformers` (transformers.js) with **Xenova/all-MiniLM-L6-v2**
 - `feature-extraction` embeddings only — no text generation, no chat, no RAG
-- **Hybrid ranking**: substring (document demo) + keyword (lexical) + semantic,
-  fused with weighted Reciprocal Rank Fusion (RRF)
+- **Hybrid ranking**: substring + keyword (lexical) + semantic, fused with
+  weighted Reciprocal Rank Fusion (RRF) — across all three surfaces
 - **Absolute-cosine scoring**: an honest per-result match %, plus a "no results"
   gate for arbitrary queries
-- **Provenance tags** (document demo): each result is labelled Exact / Close /
-  Related / Loosely related from which signals fired, with filter checkboxes
-  to show/hide each tier
-- **Off-main-thread model** (document demo): the embedding pipeline runs in a
-  Web Worker — typing never janks, even on the WASM/CPU path
+- **Provenance tags**: every result is labelled Exact / Close / Related /
+  Loosely related from which signals fired; the document finder and the
+  extension add filter checkboxes to show/hide each tier
+- **Off-main-thread model** (document demo + extension): the embedding pipeline
+  runs in a Web Worker (and, in the extension, an offscreen document) — typing
+  never janks, even on the WASM/CPU path
 - Brute-force cosine similarity (the right call at this scale)
 - Stopword-stripped keyword extraction + live match highlighting
 - IndexedDB cache for computed embeddings
@@ -50,6 +58,17 @@ npm run dev
 # / for the document finder, /inbox for the email search
 ```
 
+To build the Chrome extension (output lands in `dist-extension/`, load it via
+`chrome://extensions` → *Load unpacked*):
+
+```bash
+npm run build:extension      # one-shot
+npm run watch:extension      # rebuild on change
+```
+
+See [`extension/README.md`](extension/README.md) for loading instructions,
+keyboard controls, and the offscreen-model architecture.
+
 To start from a fresh app and copy files over:
 
 ```bash
@@ -58,7 +77,7 @@ cd semantic-find
 npm install @huggingface/transformers minisearch
 ```
 
-> The document finder's lexical half is built on **MiniSearch**, so it's a
+> The lexical half of every surface is built on **MiniSearch**, so it's a
 > runtime dependency alongside transformers.js. MiniSearch ships its own type
 > declarations — there's no separate `@types/minisearch` to install.
 
@@ -89,19 +108,14 @@ portable straight into a Chrome extension):
 | `lib/cache.ts` | IndexedDB embedding cache |
 | `lib/spellcheck.ts` | Corpus-based "did you mean?" — Damerau-Levenshtein over the indexed vocabulary (built, not yet wired into a demo) |
 
-Document-finder lexical + literal layer (also pure TypeScript, no React):
+Lexical + literal + provenance layer — shared by **both** demos and the
+extension (also pure TypeScript, no React):
 
 | File | What it is |
 |------|-----------|
-| `lib/minisearch-lexical.ts` | MiniSearch lexical engine — exact + prefix + fuzzy in one pass, plus an exact-vs-fuzzy flag per chunk |
+| `lib/minisearch-lexical.ts` | MiniSearch lexical engine — exact + prefix + fuzzy in one pass, plus an exact-vs-fuzzy flag per item |
 | `lib/substring.ts` | Literal "Ctrl+F" substring scan + occurrence counting |
-| `lib/provenance.ts` | Classifies each result as Exact / Close / Related from which signals fired |
-
-Inbox lexical core (the `/inbox` demo still uses this two-signal path):
-
-| File | What it is |
-|------|-----------|
-| `lib/keyword.ts` | Keyword extraction (stopwords + stemming) + lexical scoring |
+| `lib/provenance.ts` | Classifies each result as Exact / Close / Related / Loosely related from which signals fired |
 
 Demo 1 — document finder (`/`):
 
@@ -123,10 +137,28 @@ Demo 2 — email inbox (`/inbox`):
 | `app/inbox/page.tsx` | Client page, `dynamic(..., { ssr: false })` |
 | `app/inbox/inbox.css` | Self-contained inbox styling (`ib-` prefixed) |
 
-> **Note on `lib/keyword.ts`.** The document finder used to rank with this
-> module too, but it has been superseded there by `lib/minisearch-lexical.ts`
-> (which adds prefix and fuzzy matching). It is still the live lexical path for
-> the `/inbox` demo, so it stays in the tree.
+> **Note.** `lib/keyword.ts` (the old stopword + stemming keyword scorer) has
+> been removed. The `/inbox` demo was its last consumer; it now ranks through
+> `lib/minisearch-lexical.ts` + `lib/substring.ts` like the document finder and
+> the extension, so the whole project shares one lexical path.
+
+Chrome extension (`extension/`, MV3 — imports the shared `/lib` core verbatim;
+see [`extension/README.md`](extension/README.md) for the full writeup):
+
+| File | What it is |
+|------|-----------|
+| `extension/manifest.json` | MV3 manifest — `Alt+Shift+K` command, offscreen permission, `wasm-unsafe-eval` CSP |
+| `extension/background.ts` | Service worker: command/icon toggle + creates the offscreen document |
+| `extension/content.ts` | Shadow-DOM overlay injected into the page + all wiring |
+| `extension/extractor.ts` | Walks the live DOM into blocks + an element map for jump-to |
+| `extension/extension-search.ts` | `PageIndex` — the hybrid search brain (semantic optional) |
+| `extension/live-find.ts` | True Ctrl+F: live-DOM exact-match highlight + cycling via the CSS Custom Highlight API |
+| `extension/highlighter.ts` | Scrolls to + halos the chosen ranked result (reversible) |
+| `extension/offscreen.{html,ts}` | Extension-origin host that owns the embedding worker (dodges page CSP) |
+| `extension/embedding.worker.ts` | transformers.js pipeline over local WASM |
+| `extension/embedding-client.ts` | Content-side port to the offscreen model host |
+| `extension/{overlay,highlight}.css` | Overlay UI styles + on-page highlight styles |
+| `scripts/build-extension.mjs` | esbuild bundler → `dist-extension/` (`npm run build:extension`) |
 
 ## The search algorithm (document finder)
 
@@ -247,8 +279,12 @@ marks every occurrence, mid-word included.
 
 ## The email inbox (`/inbox`)
 
-The same engine, but the unit is **one email = one vector** (emails are short,
-well under the model's context window), so ranking returns whole emails.
+The same three-signal engine as the document finder — substring + MiniSearch
+lexical (exact/prefix/fuzzy) + semantic, fused with weighted RRF (semantic 1.0
+/ keyword 0.9 / substring 0.3) and gated/labelled by provenance — but the unit
+is **one email = one vector** (emails are short, well under the model's context
+window), so ranking returns whole emails. Each card carries the same Exact /
+Close / Related / Loosely related tag the document finder shows.
 
 **Soft author search.** A query like *"refund info from Bob"* needs no special
 parsing or hard filter. The author's name and email are folded into each email's
@@ -290,7 +326,7 @@ All adjustable without touching logic:
   keyword weight to make exact-term matches win more, raise the semantic weight
   to favour meaning, and keep the **substring weight low** (≈0.3) so a literal
   fragment stays findable without dominating the order.
-- **`SUBSTRING_WEIGHT`** (`SemanticFindUI.tsx`) — how much the literal Ctrl+F
+- **`SUBSTRING_WEIGHT`** (`SemanticFindUI.tsx` / `EmailSearchDemo.tsx`) — how much the literal Ctrl+F
   list counts toward ordering. Low by design; raise it only if you want literal
   hits to outrank meaning.
 - **`isLiteralFragment` threshold** (`lib/substring.ts`, ≤ 3 chars) — when the
@@ -305,16 +341,17 @@ All adjustable without touching logic:
   split for semantic-only results. Above this → *Related*; between this and
   `LOOSE_FLOOR` → *Loosely related*. Good matches sit ~0.4–0.6; raise toward
   0.5 for a stricter confident tier, lower if legitimate queries get demoted.
-  The always-on debug readout shows raw cosines to help tune these. For the
-  inbox, `NO_MATCH_FLOOR` in `lib/email.ts` plays the same role as
-  `LOOSE_FLOOR`.
+  The always-on debug readout shows raw cosines to help tune these. The inbox
+  uses its own `LOOSE_FLOOR` / `RELATED_FLOOR` in `EmailSearchDemo.tsx` for the
+  same gate-and-classify job; an arbitrary query that clears no signal simply
+  returns an empty result list (the old explicit `NO_MATCH_FLOOR` is gone).
 - **Fuzzy floor** (`lib/minisearch-lexical.ts`) — MiniSearch fuzzy is enabled
   only for terms ≥ 4 chars, at edit distance ≈ 0.2 × term length. Loosen for
   more typo tolerance, tighten to reduce false matches.
 - **`RECENT_RELEVANCE_FLOOR`** (`lib/email.ts`) — how relevant an email must be
   to survive the "Most recent" sort.
-- **`STOPWORDS`** (`lib/minisearch-lexical.ts` for the document finder,
-  `lib/keyword.ts` for the inbox) — what counts as query noise.
+- **`STOPWORDS`** (`lib/minisearch-lexical.ts`, shared by both demos) — what
+  counts as query noise.
 
 ## How it works (document demo)
 
@@ -380,77 +417,41 @@ click / Enter ──► scrollIntoView(anchorId)
 Shortcuts (document demo): **Alt+Shift+K** opens the finder, **↑/↓** move through
 results, **Enter** jumps to the top match, **Esc** closes.
 
-## Turning this into a Chrome extension
+## The Chrome extension (`extension/`)
 
-The core was split with this in mind: `lib/chunk.ts`, `lib/vector.ts`,
-`lib/minisearch-lexical.ts`, `lib/substring.ts`, `lib/provenance.ts`,
-`lib/keyword.ts`, `lib/cache.ts`, `lib/embedding.ts`, `lib/spellcheck.ts` and
-`lib/email.ts` have no React or Next.js imports, so they move to an extension
-unchanged — the whole hybrid pipeline, RRF fusion, substring scan, cosine
-scoring and all. The worker pair (`lib/embedding.worker.ts` +
-`lib/embedding-client.ts`) is also browser-native and maps directly onto the
-extension's offscreen-document / service-worker pattern (option 2 in the
-"Where the model runs" section below). What changes is where the text comes
-from and where the UI lives.
+This is **built and working**, not a thought experiment — `npm run
+build:extension` produces a loadable MV3 extension in `dist-extension/`. It
+runs the exact same search over the live DOM of any page you're on. Full
+loading instructions, keyboard controls, and WASM notes live in
+[`extension/README.md`](extension/README.md); the short version of how it maps
+onto this codebase:
 
-**1. Manifest (MV3).** A content script plus the model files:
+**The shared core moves over verbatim.** `lib/chunk.ts`, `lib/vector.ts`,
+`lib/minisearch-lexical.ts`, `lib/substring.ts`, `lib/provenance.ts` and
+`lib/cache.ts` have no React or Next.js imports, so the extension imports them
+directly — the whole hybrid pipeline, RRF fusion, substring scan, cosine
+scoring, provenance classifier and cache format unchanged. `extension/extension-search.ts`
+wraps them in a `PageIndex` class (the same orchestration as
+`SemanticFindUI.tsx`, minus React), with one twist: **semantic is optional** —
+if the model never loads (CSP, offline, asset missing), search still runs on
+substring + keyword alone, so find-in-page never breaks.
 
-```json
-{
-  "manifest_version": 3,
-  "name": "Semantic Find",
-  "version": "1.0",
-  "permissions": ["storage"],
-  "content_scripts": [{
-    "matches": ["<all_urls>"],
-    "js": ["content.js"],
-    "css": ["overlay.css"]
-  }],
-  "commands": {
-    "open-semantic-find": {
-      "suggested_key": { "default": "Ctrl+Shift+F" },
-      "description": "Open semantic find on this page"
-    }
-  }
-}
-```
+**The real DOM replaces `sampleDocument`.** `extension/extractor.ts` walks every
+block-level element's flow text into the same `Block[]`/`Chunk[]` shape the
+chunker already understands, folding inline markup into its block so phrases
+stay intact.
 
-**2. Replace `sampleDocument` with the real DOM.** Walk the page instead of a
-static block array:
+**The model runs in an offscreen document, not the content script.** A content
+script lives in the host page's origin, so a worker spawned there is bound by
+the page's CSP and locked-down sites block the model download. Instead the
+service worker (`background.ts`) creates an **offscreen document**
+(`offscreen.ts`, extension origin) that owns the embedding worker; the content
+side talks to it over a Port (`embedding-client.ts`). The ONNX Runtime WASM is
+bundled locally so no remote code is fetched (MV3 forbids that).
 
-```ts
-const nodes = Array.from(
-  document.querySelectorAll("p, li, h1, h2, h3, blockquote, td")
-).filter((el) => (el.textContent ?? "").trim().split(/\s+/).length > 8);
-```
-
-Tag each element with a `data-sf-id` attribute and build the same
-`Block[]`/`Chunk[]` structures — the existing chunker works as-is because it
-only deals in `{ text, id }`. The substring scan also works unchanged: it reads
-the same raw chunk text. For cleaner extraction on article pages, run Mozilla's
-Readability first and map its output back to source elements.
-
-**3. Where the model runs.** Two options:
-
-- *Simplest*: run transformers.js inside the content script. Bundle it and host
-  the WASM/ONNX files inside the extension via `web_accessible_resources`,
-  pointing `env.localModelPath` / `env.backends.onnx.wasm.wasmPaths` at
-  `chrome.runtime.getURL(...)` so nothing is fetched from the network at all.
-- *Better*: run the model in an **offscreen document** or service worker and
-  message embeddings back. The page's main thread never blocks on inference, one
-  model instance serves every tab, and strict-CSP pages can't interfere.
-
-**4. UI.** The overlay becomes a Shadow DOM root injected by the content script
-(so the host page's CSS can't bleed in), with the same input → debounce →
-substring + keyword + embed → RRF-fuse → gate → highlight flow. "Jump to result"
-becomes `element.scrollIntoView()` plus a temporary highlight class on the
-stored elements.
-
-**5. Caching per page.** Keep the IndexedDB cache but key it by
-`modelId + location.href + hash(pageText)`, so revisiting an unchanged article
-is instant while edits invalidate cleanly.
-
-The pieces that *don't* change at all: chunking, keyword extraction, the
-substring scan, cosine ranking, RRF fusion, the provenance classifier, the
-absolute-cosine scoring, top-k, the cache format, and the embedding pipeline
-itself.
+**The UI is a Shadow-DOM overlay** (`content.ts` + `overlay.css`) so the host
+page's CSS can't bleed in. On top of the ranked search it adds a true live-DOM
+**Ctrl+F layer** (`live-find.ts`) that highlights every exact match via the CSS
+Custom Highlight API (no DOM mutation, survives React re-renders), plus an
+element **halo** (`highlighter.ts`) for jumping to semantic-only results. The
+IndexedDB cache is keyed per page (`model + url + textHash`).

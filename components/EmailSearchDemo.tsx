@@ -3,21 +3,29 @@
 // ============================================================
 // components/EmailSearchDemo.tsx
 // ============================================================
-// A second face on the same search engine. Instead of one long
-// document, we search a STACK of emails. Each email becomes one
-// vector (they're short), and the existing hybrid pipeline —
-// keyword extraction + semantic cosine, fused with RRF — ranks
-// them. Two new UI ideas over the first demo:
+// A second face on the SAME hybrid search core as the document
+// finder (components/SemanticFindUI.tsx) and the Chrome extension
+// (extension/extension-search.ts). Instead of one long document we
+// search a STACK of emails; each email becomes one vector (they're
+// short) and one searchable-text row. The three signals are fused
+// with weighted RRF exactly as in the other two demos:
 //
+//   substring  lib/substring.ts        literal Ctrl+F (chars)
+//   keyword    lib/minisearch-lexical  tokens: exact + prefix + fuzzy
+//   semantic   lib/embedding + vector  cosine over 384-dim vectors
+//   fusion     lib/vector (RRF)        rank-position blend + gate
+//   tags       lib/provenance          Exact / Close / Related / Loose
+//
+// Email-specific UI on top of that shared engine:
 //   • a prominent command-style search bar as the page's centre
 //   • result cards you expand IN PLACE to read the full email
-//     with matched keywords highlighted
-//
-// Plus a Best / Recent sort toggle (relevance vs newest-first)
-// and a corpus switch between two unrelated sample inboxes.
+//     with matched keywords highlighted, each tagged by provenance
+//   • a Best / Recent sort toggle (relevance vs newest-first)
+//   • a corpus switch between two unrelated sample inboxes
 //
 // Reused unchanged from the first demo:
-//   lib/embedding.ts  lib/vector.ts  lib/keyword.ts  lib/cache.ts
+//   lib/embedding.ts  lib/vector.ts  lib/substring.ts
+//   lib/minisearch-lexical.ts  lib/provenance.ts  lib/cache.ts
 // New, email-specific:
 //   lib/email.ts  components/sampleEmails*.ts
 // ============================================================
@@ -41,13 +49,18 @@ import {
 import { hashText } from "@/lib/chunk";
 import { loadEmbeddings, saveEmbeddings } from "@/lib/cache";
 import { topK, reciprocalRankFusion, type Scored } from "@/lib/vector";
-import { extractKeywords, keywordScores } from "@/lib/keyword";
+import {
+  buildLexicalIndex,
+  lexicalSearch,
+  type LexicalIndex,
+} from "@/lib/minisearch-lexical";
+import { substringHits } from "@/lib/substring";
+import { classify, PROVENANCE_META } from "@/lib/provenance";
 import {
   emailEmbedText,
   emailKeywordText,
   sortRankedEmails,
   relativeTime,
-  NO_MATCH_FLOOR,
   type SortMode,
   type RankedEmail,
 } from "@/lib/email";
@@ -59,6 +72,22 @@ type Phase =
   | { name: "error"; message: string };
 
 const DEBOUNCE_MS = 220;
+
+// ---- Hybrid-search tuning (mirrors SemanticFindUI / extension-search) ----
+// Two-tier semantic gating: an email with no lexical/substring hit must
+// clear LOOSE_FLOOR to show at all, and only reads as a confident
+// "Related" above RELATED_FLOOR. Below LOOSE_FLOOR with no lexical hit it
+// is gated out entirely — that's also the "this query matches nothing"
+// case (the result list simply comes back empty).
+const LOOSE_FLOOR = 0.15;
+const RELATED_FLOOR = 0.4;
+const SEMANTIC_WEIGHT = 1.0;
+const LEXICAL_WEIGHT = 0.9;
+// Substring ranks LOW on purpose: it's the Ctrl+F safety net for the
+// gate, not a relevance signal — otherwise a one-char query would flood
+// the top with whatever email contains that letter most.
+const SUBSTRING_WEIGHT = 0.3;
+const MAX_RESULTS = 50; // flood guard before Best/Recent sorting
 
 const CORPORA = {
   lumenote: { title: LUMENOTE_INBOX_TITLE, emails: sampleEmails },
@@ -83,8 +112,8 @@ const EXAMPLES: Record<CorpusKey, string[]> = {
   ],
 };
 
-// Wrap matched keywords in <mark>. Prefix match so the stemmed
-// keyword "refund" lights up "refunds"/"refunding" in raw text.
+// Wrap matched keywords in <mark>. Prefix match so a stemmed doc
+// term like "refund" lights up "refunds"/"refunding" in raw text.
 function highlight(text: string, keywords: string[]): React.ReactNode {
   if (keywords.length === 0) return text;
   const esc = keywords.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
@@ -120,8 +149,6 @@ export default function EmailSearchDemo() {
   const [activeKeywords, setActiveKeywords] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  // True when the query is so arbitrary nothing genuinely matches.
-  const [noMatch, setNoMatch] = useState(false);
 
   const extractorRef = useRef<FeatureExtractionPipeline | null>(null);
   const vectorsRef = useRef<Float32Array[]>([]);
@@ -135,6 +162,16 @@ export default function EmailSearchDemo() {
   );
   const keywordTexts = useMemo(
     () => emails.map(emailKeywordText),
+    [emails]
+  );
+
+  // MiniSearch lexical index over the same searchable text (subject +
+  // author + tags + body). Rebuilt only when the corpus switches.
+  const lexIndex: LexicalIndex = useMemo(
+    () =>
+      buildLexicalIndex(
+        emails.map((e) => ({ text: emailKeywordText(e), heading: e.subject }))
+      ),
     [emails]
   );
 
@@ -211,7 +248,6 @@ export default function EmailSearchDemo() {
       const id = setTimeout(() => {
         setResults([]);
         setActiveKeywords([]);
-        setNoMatch(false);
         setSearching(false);
       }, 0);
       return () => clearTimeout(id);
@@ -223,55 +259,94 @@ export default function EmailSearchDemo() {
       try {
         const extractor = extractorRef.current!;
 
-        // keyword ranking
-        const keywords = extractKeywords(q);
-        const kw = keywordScores(keywordTexts, keywords)
-          .filter((s) => s.hits > 0)
-          .sort((a, b) => b.score - a.score);
-        const keywordOrder = kw.map((s) => s.index);
+        // --- Signal 1: literal substring (Ctrl+F over the email text) ---
+        const subHits = substringHits(keywordTexts, q);
+        const subCountMap = new Map(subHits.map((h) => [h.index, h.count]));
+        const subHitSet = new Set(subHits.map((h) => h.index));
+        const substringOrder = [...subHits]
+          .sort((a, b) => b.count - a.count)
+          .map((h) => h.index);
 
-        // semantic ranking
+        // --- Signal 2: lexical (MiniSearch exact + prefix + fuzzy) ---
+        const lexHits = lexicalSearch(lexIndex, q);
+        const lexHitSet = new Set(lexHits.map((h) => h.index));
+        const lexTermsMap = new Map(lexHits.map((h) => [h.index, h.terms]));
+        const lexExactSet = new Set(
+          lexHits.filter((h) => h.hasExact).map((h) => h.index)
+        );
+        const lexFuzzySet = new Set(
+          lexHits.filter((h) => h.fuzzyOnly).map((h) => h.index)
+        );
+        const keywordOrder = lexHits.map((h) => h.index);
+
+        // --- Signal 3: semantic (embed + cosine) ---
         const qVec = await embedText(extractor, q);
         if (seq !== searchSeq.current) return;
         const sem = topK(qVec, vectorsRef.current, vectorsRef.current.length);
         const semanticOrder = sem.map((s: Scored) => s.index);
-
         // Raw cosine is an ABSOLUTE match-quality signal (RRF score is
-        // only relative). Use it both to detect "no real match" and to
-        // show an honest % / spine height per result.
-        const cosineByIndex = new Map(sem.map((s) => [s.index, s.score]));
-        const bestCosine = sem.length > 0 ? sem[0].score : 0;
+        // only relative). Drives the % label, the spine, and the gate.
+        const cosineMap = new Map(sem.map((s) => [s.index, s.score]));
 
-        // Nothing matches if the best email is semantically far AND no
-        // keyword landed. The keyword half rescues exact-term queries
-        // (names, "GDPR") the embedder underrates, so we never blank out
-        // a legitimate lexical hit.
-        if (bestCosine < NO_MATCH_FLOOR && keywordOrder.length === 0) {
-          setResults([]);
-          setActiveKeywords(keywords);
-          setNoMatch(true);
-          return;
-        }
-
-        // fuse
+        // --- Fuse semantic + keyword + substring with weighted RRF ---
         const fused = reciprocalRankFusion(
           [
-            { name: "semantic", list: { order: semanticOrder, weight: 1.0 } },
-            { name: "keyword", list: { order: keywordOrder, weight: 1.0 } },
+            { name: "semantic", list: { order: semanticOrder, weight: SEMANTIC_WEIGHT } },
+            { name: "keyword", list: { order: keywordOrder, weight: LEXICAL_WEIGHT } },
+            { name: "substring", list: { order: substringOrder, weight: SUBSTRING_WEIGHT } },
           ],
-          emails.length // keep all; sort/trim happens in sortRankedEmails
+          emails.length // keep all; the Best/Recent sort trims later
         );
 
-        setResults(sortRankedEmails(fused, emails, sortMode, cosineByIndex));
-        setActiveKeywords(keywords);
-        setNoMatch(false);
+        // --- Gate: substring hit OR lexical hit OR cosine >= LOOSE_FLOOR.
+        //     The substring/lexical arms keep the Ctrl+F + exact-term
+        //     promise (a name or "GDPR" the embedder underrates still
+        //     surfaces); the cosine arm admits pure-meaning matches. An
+        //     arbitrary query that clears none of these returns nothing. ---
+        const gated: RankedEmail[] = fused
+          .filter((r) => {
+            const cosine = cosineMap.get(r.index) ?? 0;
+            return (
+              subHitSet.has(r.index) ||
+              lexHitSet.has(r.index) ||
+              cosine >= LOOSE_FLOOR
+            );
+          })
+          .slice(0, MAX_RESULTS)
+          .map((r) => {
+            const cosine = cosineMap.get(r.index) ?? 0;
+            return {
+              email: emails[r.index],
+              score: r.score,
+              cosine,
+              index: r.index,
+              matchedTerms: lexTermsMap.get(r.index) ?? [],
+              substringCount: subCountMap.get(r.index) ?? 0,
+              provenance: classify(
+                {
+                  hasSubstring: subHitSet.has(r.index),
+                  hasExactKeyword: lexExactSet.has(r.index),
+                  hasFuzzyKeyword: lexFuzzySet.has(r.index),
+                  cosine,
+                },
+                { relatedFloor: RELATED_FLOOR, looseFloor: LOOSE_FLOOR }
+              ),
+            };
+          });
+
+        const allMatchedTerms = [
+          ...new Set(gated.flatMap((r) => r.matchedTerms)),
+        ];
+
+        setResults(sortRankedEmails(gated, sortMode));
+        setActiveKeywords(allMatchedTerms);
       } finally {
         if (seq === searchSeq.current) setSearching(false);
       }
     }, DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [q, phase.name, sortMode, emails, keywordTexts]);
+  }, [q, phase.name, sortMode, emails, keywordTexts, lexIndex]);
 
   const ready = phase.name === "ready";
   const showResults = ready && q.length > 0;
@@ -461,6 +536,12 @@ export default function EmailSearchDemo() {
                           : highlight(e.body.slice(0, 160) + "…", activeKeywords)}
                       </span>
                       <span className="ib-tags">
+                        <span
+                          className={`ib-prov ib-prov-${r.provenance}`}
+                          aria-label="match type"
+                        >
+                          {PROVENANCE_META[r.provenance].label}
+                        </span>
                         {e.tags.map((t) => (
                           <span className="ib-tag" key={t}>
                             {t}
@@ -496,11 +577,4 @@ export default function EmailSearchDemo() {
       )}
     </div>
   );
-}
-
-// Relevance strength in [0,1], normalized to the top result of the
-// current list, for the spine height and the percentage label.
-function relStrength(r: RankedEmail, all: RankedEmail[]): number {
-  const top = all.reduce((m, x) => Math.max(m, x.score), 0);
-  return top > 0 ? r.score / top : 0;
 }

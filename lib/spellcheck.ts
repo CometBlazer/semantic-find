@@ -14,8 +14,8 @@
 // of error needs query logs we don't have; corpus-dictionary
 // correction is the achievable, fully-local 90%.
 //
-// Framework-free like lib/keyword.ts — same code could run in the
-// Chrome-extension content script later.
+// Framework-free like the rest of the /lib core — same code could
+// run in the Chrome-extension content script later.
 // ============================================================
 
 // ---- Vocabulary ----------------------------------------------
@@ -28,8 +28,8 @@ export interface Vocabulary {
 }
 
 /** Lowercase word tokens; keep letters and digits, drop the rest.
- *  Mirrors the tokenizer feel in lib/keyword.ts but WITHOUT stemming
- *  — spell-check must compare against real surface words, not stems. */
+ *  Mirrors the lexical tokenizer feel but WITHOUT stemming — spell-check
+ *  must compare against real surface words, not stems. */
 function words(text: string): string[] {
   return text
     .toLowerCase()
