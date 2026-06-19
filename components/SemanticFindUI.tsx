@@ -717,7 +717,7 @@ export default function SemanticFindDemo() {
                   )}
                   <p className="sf-debughint">
                     If a query you expected to match sits just under the floor,
-                    lower <code>LOOSE_FLOOR</code> in SemanticFindDemo.tsx.
+                    lower <code>LOOSE_FLOOR</code> in SemanticFindUI.tsx.
                   </p>
                 </div>
               )}
