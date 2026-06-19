@@ -17,6 +17,14 @@
 import { extractBlocks, type ExtractResult } from "./extractor";
 import { PageIndex, type SearchResult } from "./extension-search";
 import { highlightElement, clearHighlights } from "./highlighter";
+import {
+  runLiveFind,
+  clearLiveFind,
+  setCurrentMatch,
+  nextMatch,
+  prevMatch,
+  currentMatchIndex,
+} from "./live-find";
 import { loadModel, embedText, embedChunks, MODEL_ID } from "./embedding-client";
 import { PROVENANCE_META, PROVENANCE_ORDER, type Provenance } from "../lib/provenance";
 import { loadEmbeddings, saveEmbeddings } from "../lib/cache";
@@ -60,6 +68,8 @@ let searchTimer: number | undefined;
 let semanticTimer: number | undefined;
 let searchSeq = 0;
 let debugOn = false;
+// Count of exact on-page occurrences from the last live (Ctrl+F) scan.
+let lastLiteralCount = 0;
 // Which edge the overlay docks to; toggled by the ⇄ header button so it
 // can be moved off whatever it's covering.
 let side: "right" | "left" = "right";
@@ -226,6 +236,7 @@ async function openOverlay(): Promise<void> {
 function closeOverlay(): void {
   isOpen = false;
   clearHighlights();
+  clearLiveFind();
   if (els) els.panel.classList.remove("sf-ext-open");
 }
 
@@ -327,7 +338,15 @@ async function runSearch(): Promise<void> {
   lastQuery = query;
   const seq = ++searchSeq;
 
-  // Pass 1: instant, no embedding. Guarantees Ctrl+F responsiveness.
+  // Pass 0: true Ctrl+F. Scan the LIVE DOM and highlight EVERY exact
+  // occurrence — uncapped, ungated, occurrence-level — then jump to the
+  // first. Independent of the chunk snapshot, so it can't go stale or be
+  // ranked away. (No-op for queries not literally present, e.g. semantic
+  // paraphrases, which the ranked list below handles.)
+  lastLiteralCount = runLiveFind(query.trim());
+  if (lastLiteralCount > 0) setCurrentMatch(0);
+
+  // Pass 1: instant ranked list, no embedding (semantic discovery).
   const fast = page.search(query, null);
   if (seq === searchSeq) {
     lastResults = fast.results;
@@ -373,13 +392,27 @@ function renderMeta(out: {
     return;
   }
   const parts: string[] = [];
-  if (out.totalOccurrences > 0) {
+  // Exact, live-DOM occurrence readout (Ctrl+F style): "3/12 exact on page".
+  if (lastLiteralCount > 0) {
+    const pos = currentMatchIndex() >= 0 ? `${currentMatchIndex() + 1}/` : "";
     parts.push(
-      `${out.totalOccurrences} literal match${out.totalOccurrences === 1 ? "" : "es"} across ${out.literalChunkCount} section${out.literalChunkCount === 1 ? "" : "s"}`
+      `${pos}${lastLiteralCount} exact match${lastLiteralCount === 1 ? "" : "es"} on page`
     );
+  } else {
+    parts.push("no exact matches on page");
   }
   parts.push(`${out.results.length} result${out.results.length === 1 ? "" : "s"}`);
   els.meta.textContent = parts.join(" · ");
+}
+
+/** Refresh just the meta line after the current match changes (Enter /
+ *  Shift+Enter cycling) without re-running the whole search. */
+function refreshMeta(): void {
+  renderMeta({
+    totalOccurrences: 0,
+    literalChunkCount: 0,
+    results: lastResults,
+  });
 }
 
 function renderResults(results: SearchResult[]): void {
@@ -530,7 +563,11 @@ function jumpTo(visibleIdx: number): void {
     snippet: snippetFor(chunk.text, needle),
   });
 
-  if (target.el) highlightElement(target.el, needle);
+  // Halo the element to show WHERE the chunk is. We deliberately don't
+  // pass the needle: live-find.ts already highlights every literal
+  // occurrence page-wide via the CSS Highlight API, so there's no need to
+  // mutate the page DOM with <mark> wrappers (which break on SPA pages).
+  if (target.el) highlightElement(target.el);
 }
 
 // =============================================================
@@ -551,7 +588,16 @@ function onInputKeyDown(e: KeyboardEvent): void {
     markActive();
   } else if (e.key === "Enter") {
     e.preventDefault();
-    if (shown.length) jumpTo(activeIdx);
+    // Ctrl+F semantics: Enter / Shift+Enter cycle through every exact
+    // on-page match. With no exact matches, fall back to jumping to the
+    // selected ranked result.
+    if (lastLiteralCount > 0) {
+      if (e.shiftKey) prevMatch();
+      else nextMatch();
+      refreshMeta();
+    } else if (shown.length) {
+      jumpTo(activeIdx);
+    }
   }
 }
 

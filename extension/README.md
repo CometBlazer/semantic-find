@@ -17,6 +17,12 @@ The extension reuses the shared search core verbatim:
 | `provenance.ts`            | Exact / Close / Related / Loose tags   |
 | `cache.ts`                 | IndexedDB embedding cache              |
 
+That shared core powers the **ranked** search (substring + keyword +
+semantic fusion) over a one-time page snapshot. The extension adds one
+thing the demo doesn't: a live-DOM **Ctrl+F layer** (`live-find.ts`) that
+highlights every exact match independently of that snapshot, so literal
+find always works (see *What works today*).
+
 Extension-only code lives in `/extension`:
 
 | File                   | Role                                                  |
@@ -27,7 +33,8 @@ Extension-only code lives in `/extension`:
 | `overlay.css`          | overlay UI styles (injected into the shadow root)      |
 | `highlight.css`        | on-page highlight styles (loaded onto the host page)   |
 | `extractor.ts`         | reads ALL visible page text into blocks + element map  |
-| `highlighter.ts`       | scrolls to + highlights the chosen result (reversible) |
+| `live-find.ts`         | true Ctrl+F: live-DOM exact match highlight + cycling   |
+| `highlighter.ts`       | scrolls to + halos the chosen ranked result (reversible) |
 | `extension-search.ts`  | hybrid search orchestration (semantic optional)        |
 | `embedding.worker.ts`  | transformers.js pipeline, local WASM                   |
 | `embedding-client.ts`  | content-side port to the offscreen model host          |
@@ -90,26 +97,39 @@ Find* → `Alt+Shift+K`. You can also click the toolbar icon to toggle.
 | ----------------------- | ----------------------------------------------------- |
 | `Alt+Shift+K`           | open the finder (or, if open, re-focus + select query) |
 | `Esc`                   | close the finder (the only close shortcut)            |
-| `↑` / `↓`               | move the result selection                             |
-| `Enter`                 | jump to + highlight the selected result               |
-| click a result          | jump to + highlight it on the page                    |
+| `Enter` / `Shift+Enter` | next / previous **exact** match (Ctrl+F-style cycling) |
+| `↑` / `↓`               | move the selection in the ranked (semantic) result list |
+| click a result          | jump to + highlight that ranked result                |
 | `Alt+Shift+←`           | dock the panel to the **left** edge                   |
 | `Alt+Shift+→`           | dock the panel to the **right** edge                  |
 | `⇄` (header button)     | toggle the panel between left / right edges           |
 
+(When a query has no exact on-page matches, `Enter` falls back to jumping
+to the selected ranked result.)
+
 The finder stays open until you press `Esc` — `Alt+Shift+K` while it's
 already open just re-selects the query so you can type the next search.
 
-The header shows the **total result count**, and each provenance filter
-chip carries a live **per-category count** (Exact / Close / Related /
-Loose) so you can see the breakdown and toggle categories on/off.
+The meta line shows the live **exact-match position** (e.g. `3/12 exact
+matches on page`, Ctrl+F-style) alongside the **ranked result count**, and
+each provenance filter chip carries a live **per-category count** (Exact /
+Close / Related / Loose) so you can see the breakdown and toggle categories
+on/off.
 
 ## What works today
 
 - Shadow-DOM overlay isolated from host-page CSS, with key/input events
   contained so SPAs (e.g. claude.ai) can't steal your typing into their
   own composer.
-- **Whole-page extraction (Ctrl+F parity):** every block-level element's
+- **True Ctrl+F for exact matches (`live-find.ts`):** a separate live-DOM
+  layer scans the page on every keystroke and highlights EVERY exact
+  occurrence — uncapped, ungated, occurrence-level — then auto-jumps to the
+  first; `Enter`/`Shift+Enter` cycle through them. It uses the CSS Custom
+  Highlight API (no DOM mutation), so it works on React/SPA pages (Gmail,
+  claude.ai) where injected `<mark>` tags get wiped, and it re-scans each
+  query so it never goes stale. This is independent of the ranked snapshot
+  below, which guarantees the literal-find promise.
+- **Whole-page extraction for ranked search:** every block-level element's
   own flow text is indexed — nav bars, headings, links, buttons, footers,
   captions, and body copy — with inline markup (`<a>`/`<span>`/…) folded
   into its block so phrases stay intact, and no duplication.
@@ -119,8 +139,11 @@ Loose) so you can see the breakdown and toggle categories on/off.
 - Optional semantic search via local embeddings running in an offscreen
   document, with an IndexedDB cache keyed per page (`model + url +
   textHash`).
-- Scroll-to + on-page highlight (element halo + reversible literal
-  `<mark>`s), cleaned up on close / query change.
+- Two highlight layers, both cleaned up on close / query change: exact
+  matches are painted page-wide via the CSS Custom Highlight API
+  (`live-find.ts`, no DOM mutation), and the chosen ranked result gets an
+  element **halo** (`highlighter.ts`) to show where a semantic-only match
+  lives even when it shares no words with the query.
 - Movable panel (left/right via the `⇄` button or `Alt+Shift+←`/`→`) so
   results never permanently block what you're reading.
 - Graceful degradation: if the model fails to load, literal + keyword

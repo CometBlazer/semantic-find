@@ -24,3 +24,16 @@ mark[data-sf-mark] {
   padding: 0 1px !important;
   border-radius: 2px !important;
 }
+
+/* Live Ctrl+F highlighting via the CSS Custom Highlight API (live-find.ts).
+   These paint text ranges with no DOM mutation. ::highlight() only accepts
+   a handful of properties (background-color, color, text-decoration…). */
+::highlight(sf-find) {
+  background-color: #fde68a;
+  color: #000;
+}
+
+::highlight(sf-find-current) {
+  background-color: #f59e0b;
+  color: #000;
+}
